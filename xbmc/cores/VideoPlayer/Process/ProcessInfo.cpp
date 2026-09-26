@@ -79,7 +79,18 @@ void CProcessInfo::ResetVideoCodecInfo()
   m_videoQueueLevel = 0;
   m_videoQueueDataLevel = 0;
   m_videoIsInterlaced = false;
-  m_doviIsFEL = false;
+  /* m_doviIsFEL is deliberately NOT reset here. Whether a title carries a
+   * full enhancement layer is a property of the STREAM, not of the codec
+   * instance, and it can only be learned by observation - the converter
+   * sets it once an RPU shows residual, which for a decoder opened mid-GOP
+   * is not the first RPU it sees. This function runs on EVERY codec
+   * creation, which on a Blu-ray includes each menu->feature transition,
+   * so clearing it here threw the answer away moments before the feature's
+   * decoder asked for it. Three places already depend on the flag holding
+   * for the title - CVideoPlayer's FEL branches and the player-info
+   * hdrDetail line that prints "FEL" or "MEL".
+   * It lives as long as this CProcessInfo, one of which is constructed per
+   * CVideoPlayer, so the next playback still starts from false. */
   m_deintMethods.clear();
   m_deintMethods.push_back(EINTERLACEMETHOD::VS_INTERLACEMETHOD_NONE);
   m_deintMethodDefault = EINTERLACEMETHOD::VS_INTERLACEMETHOD_NONE;

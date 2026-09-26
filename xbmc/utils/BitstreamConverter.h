@@ -230,6 +230,11 @@ public:
   // CMV40_AUTO trigger. Set BEFORE SetAppendCMv40, like the bypass inputs.
   void SetCMv40AutoTrigger(enum DOVICMv40AutoTrigger value) { m_cmv40_auto_trigger = value; }
   bool GetDoviIsFEL() const { return m_doviIsFEL; }
+  /* FEL is discovered by seeing residual in an RPU, and a fresh converter
+   * is built for every decoder open - so a title already known to carry a
+   * full enhancement layer would be re-guessed as MEL at each reopen.
+   * The owner seeds what earlier opens established. */
+  void SetDoviIsFEL(bool value) { m_doviIsFEL = value; }
   //! @brief Whether the access unit just converted contained an IRAP (IDR/CRA/BLA).
   //! A seamless Blu-ray branch is authored to start on one, and that IRAP is what
   //! resets decoder references. Only the dual-layer overload classifies the unit,

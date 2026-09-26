@@ -1028,6 +1028,20 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
       pData = m_bitstream->GetConvertBuffer();
       iSize = m_bitstream->GetConvertSize();
       doviIsFEL = m_bitstream->GetDoviIsFEL();
+      // A converter is rebuilt for every open and starts out believing the
+      // stream is MEL until an RPU proves otherwise, so a feature that
+      // reopens mid-GOP can configure the decoder for the wrong layer type.
+      // CProcessInfo outlives the codec and carries what earlier opens
+      // learned, so trust it and tell this converter too. Latching on the
+      // positive keeps it one-way: a genuine MEL stream never reads FEL, so
+      // this can only recover a missed FEL, never invent one.
+      if (doviIsFEL)
+        m_processInfo.SetDoviIsFEL(true);
+      else if (m_processInfo.GetDoviIsFEL())
+      {
+        doviIsFEL = true;
+        m_bitstream->SetDoviIsFEL(true);
+      }
       // The converter may only recognise a full enhancement layer partway into a
       // title - a decoder opened mid-GOP sees no residual in its first RPU - so
       // the copy CAMLCodec took at OpenDecoder can go stale. Push the change
