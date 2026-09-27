@@ -1310,16 +1310,15 @@ void CRenderManager::PrepareNextRender()
       m_videoDelay -
       static_cast<double>(CServiceBroker::GetWinSystem()->GetFrameLatencyAdjustment()));
 
-  // While the clock is paused, frameOnScreen does not advance, so adding the display
-  // latency would pick a frame ahead of the one actually shown. That only holds for
-  // renderers that draw the video into our framebuffer and re-pick every refresh.
-  // Renderers that hand frames to a hardware plane queue (VideoBypassesFramebuffer)
-  // cannot take a released frame back: frames released without the latency during an
-  // internal pause (caching, display reset) keep that lead and video stays ahead of audio.
-  const bool isPaused =
-      m_dvdClock.IsPaused() && !(m_pRenderer && m_pRenderer->VideoBypassesFramebuffer());
+  const bool isPaused = m_dvdClock.IsPaused();
+  // A hardware-plane renderer (the AML video layer) cannot take back a frame it has
+  // released, so keep the display latency while paused: a frame picked during any pause
+  // (user, caching, display reset) is then picked as in play. Only the latency, from
+  // xbmc/xbmc #29406; the mid-frame advance below stays off while paused (0f0425b38e).
+  // Twin: CDVDVideoCodecAmlogic::DrainMetadataToClock.
+  const bool keepLatency = m_pRenderer && m_pRenderer->VideoBypassesFramebuffer();
   double renderPts = frameOnScreen;
-  if (!isPaused)
+  if (!isPaused || keepLatency)
     renderPts += m_displayLatency;
 
   const double nextFramePts =
