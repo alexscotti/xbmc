@@ -464,9 +464,7 @@ public:
   uint32_t GetBdjKeyInterest() const { return m_bdjKeyInterest.load(); }
 
   BLURAY_TITLE_INFO* GetTitleFromState(const std::string& xmlstate);
-  BLURAY_TITLE_INFO* GetTitleLongest();
   BLURAY_TITLE_INFO* GetTitleFile(const std::string& name);
-  bool DiscHasDolbyVision();
 
   /*! \brief Refresh m_pqAuthoredGraphics from the current playitem's STN table.
    * Player thread only; call wherever m_clip changes. */
@@ -624,8 +622,10 @@ protected:
   std::atomic<uint32_t> m_uoMask{0};
   std::atomic<uint32_t> m_bdjKeyInterest{0};
   bool m_navmode = false;
-  // Latched true at Open when this disc's DV session is engaged (DV disc + DV
-  // display); held for the whole disc session. Marks the BD-J and HDMV
+  // Never set in this build: Open no longer engages a DV disc session, so every
+  // segment plays in its own format and m_pqAuthoredGraphics alone decides the
+  // graphics regime. Upstream latched it at Open (DV disc + DV display) and
+  // held it for the whole disc session. Marks the BD-J and HDMV
   // overlays as PQ-authored (m_isHDROverlay): a STABLE signal that correctly predicts the DV/PQ
   // output plane, unlike the live aml_dv_get_output_mode() which flips across
   // the repeated OpenDecoder calls of a movie-load transition (that flicker
@@ -658,7 +658,6 @@ protected:
   std::atomic<bool> m_pqAuthoredGraphics{false};
   bool m_pqRegimeLogged = false;
   int m_dispTimeBeforeRead = 0;
-  int                 m_nTitles = -1;
   std::string         m_root;
 
   // MVC related members

@@ -120,53 +120,6 @@ BLURAY_TITLE_INFO* CDVDInputStreamBluray::GetTitleFromState(const std::string& x
   return bd_get_playlist_info(m_bd, blurayState.playlistId, 0);
 }
 
-BLURAY_TITLE_INFO* CDVDInputStreamBluray::GetTitleLongest()
-{
-  BLURAY_TITLE_INFO *s = nullptr;
-  for(int i=0; i < m_nTitles; i++)
-  {
-    BLURAY_TITLE_INFO *t = bd_get_title_info(m_bd, i, 0);
-    if(!t)
-    {
-      CLog::Log(LOGDEBUG, "get_main_title - unable to get title {}", i);
-      continue;
-    }
-    if(!s || s->duration < t->duration)
-      std::swap(s, t);
-
-    if(t)
-      bd_free_title_info(t);
-  }
-  return s;
-}
-
-bool CDVDInputStreamBluray::DiscHasDolbyVision()
-{
-#if (BLURAY_VERSION < BLURAY_VERSION_CODE(1, 5, 0))
-  return false;
-#else
-  // A DV BD declares its dv_streams in the STN table of the feature
-  // playlist(s); menu/bumper playlists declare none, so scan every relevant
-  // title until one clip carries a DV stream.
-  for (int i = 0; i < m_nTitles; i++)
-  {
-    BLURAY_TITLE_INFO* t = bd_get_title_info(m_bd, i, 0);
-    if (!t)
-      continue;
-    bool hasDV = false;
-    for (uint32_t c = 0; c < t->clip_count && !hasDV; c++)
-      hasDV = t->clips[c].dv_stream_count > 0;
-    bd_free_title_info(t);
-    if (hasDV)
-    {
-      CLog::Log(LOGINFO, "CDVDInputStreamBluray::DiscHasDolbyVision - DV stream found in title {}", i);
-      return true;
-    }
-  }
-  return false;
-#endif
-}
-
 bool CDVDInputStreamBluray::ClipFormatsMatch(const BLURAY_CLIP_INFO* a,
                                              const BLURAY_CLIP_INFO* b)
 {
@@ -745,8 +698,9 @@ bool CDVDInputStreamBluray::Open()
     return false;
   }
 
-  m_nTitles = bd_get_titles(m_bd, TITLES_RELEVANT, 0);
-
+  // No bd_get_titles() here: it opens and parses every .mpls on the disc, and
+  // nothing below needs the list. Navigation plays from index.bdmv, and the
+  // .mpls and resume paths name their playlist.
   if (URIUtils::HasExtension(filename, ".mpls"))
   {
     m_navmode = false;
@@ -763,42 +717,23 @@ bool CDVDInputStreamBluray::Open()
     if (!disc_info->first_play_supported)
     {
       CLog::Log(LOGERROR, "CDVDInputStreamBluray::Open - Can't play disc in HDMV navigation mode - First Play title not supported");
-      m_navmode = false;
+      return false;
     }
 
     if (m_navmode && disc_info->num_unsupported_titles > 0) {
       CLog::Log(LOGERROR, "CDVDInputStreamBluray::Open - Unsupported titles found - Some titles can't be played in navigation mode");
     }
-
-    if(!m_navmode)
-      m_titleInfo = GetTitleLongest();
   }
 
   LogTitleAppInfo();
 
-  // open-time title selection (.mpls / resume / longest): no pipeline exists
+  // open-time title selection (.mpls / resume): no pipeline exists
   // yet, so the presented UI snapshot IS the demux truth - set it directly
   if (m_titleInfo)
     m_titleUiPresented = BuildTitleUiSnapshot();
 
   if (m_navmode)
   {
-    // Disc-session DV latch: if this disc carries Dolby Vision and the display
-    // can take it, engage the DV output at the first DV mode set and keep it
-    // for the whole disc session. Menu-domain segments without a DV stream
-    // (FirstPlay bumpers, menu loops) are VS10-mapped into DV by VideoPlayer,
-    // so the HDMI DV signalling never bounces at segment boundaries (each
-    // bounce is a ~2s TV resync that segment audio plays straight through).
-    if (aml_support_dolby_vision() && aml_display_support_dv() &&
-        !CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
-            CSettings::SETTING_COREELEC_AMLOGIC_DV_DISABLE) &&
-        DiscHasDolbyVision())
-    {
-      m_dvDiscSession = true;
-      aml_dv_set_disc_session(true);
-      aml_dv_pre_engage_disc_session();
-    }
-
     bd_register_overlay_proc (m_bd, this, bluray_overlay_cb);
 #ifdef HAVE_LIBBLURAY_BDJ
     bd_register_argb_overlay_proc (m_bd, this, bluray_overlay_argb_cb, nullptr);
@@ -837,22 +772,6 @@ bool CDVDInputStreamBluray::Open()
       CLog::Log(LOGERROR, "CDVDInputStreamBluray::Open - failed to select playlist {}",
                 m_titleInfo->idx);
       return false;
-    }
-
-    // Disc-session DV latch for NON-navmode playback too (.mpls direct /
-    // resume): a multi-playitem DV playlist takes the same decoder-swap
-    // no-source gaps as menu navigation, and without the session the kernel
-    // VSIF hold never engages - per-segment DV drops the latch was built to
-    // prevent (review §B). Same conditions as the navmode path.
-    if (aml_support_dolby_vision() && aml_display_support_dv() &&
-        !CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
-            CSettings::SETTING_COREELEC_AMLOGIC_DV_DISABLE) &&
-        DiscHasDolbyVision())
-    {
-      CLog::Log(LOGINFO, "CDVDInputStreamBluray::Open - DV disc session latched (non-navmode)");
-      m_dvDiscSession = true;
-      aml_dv_set_disc_session(true);
-      aml_dv_pre_engage_disc_session();
     }
   }
 
