@@ -4119,7 +4119,7 @@
         <setting id="coreelec.amlogic.noisereduction" type="boolean" label="14402" help="14403">
           <requirement>HAVE_AMCODEC</requirement>
           <level>3</level>
-          <default>false</default>
+          <default>true</default>
           <control type="toggle" />
         </setting>
         <setting id="coreelec.amlogic.sdr2hdr" type="boolean" label="14404" help="14405">
