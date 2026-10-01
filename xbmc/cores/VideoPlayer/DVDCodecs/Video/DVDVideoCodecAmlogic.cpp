@@ -169,6 +169,13 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
       break;
     case AV_CODEC_ID_MPEG1VIDEO:
     case AV_CODEC_ID_MPEG2VIDEO:
+      if (aml_get_cpufamily_id() == AML_S6)
+      {
+        // See the VC-1 case below: same artifact on the same S6 VDEC path.
+        CLog::Log(LOGINFO, "{}: MPEG-1/2 on S6 is decoded in software (VDEC artifacts)",
+                  __MODULE_NAME__);
+        goto FAIL;
+      }
       if (m_hints.width <= CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(CSettings::SETTING_VIDEOPLAYER_USEAMCODECMPEG2))
         goto FAIL;
 
@@ -289,10 +296,17 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
       CLog::Log(LOGDEBUG, "{}::{} - amcodec does not support RMVB", __MODULE_NAME__, __FUNCTION__);
       goto FAIL;
     case AV_CODEC_ID_VC1:
-      m_pFormatName = "am-vc1";
-      break;
     case AV_CODEC_ID_WMV3:
-      m_pFormatName = "am-wmv3";
+      if (aml_get_cpufamily_id() == AML_S6)
+      {
+        // S6 (S905X5) VDEC shows short horizontal line artifacts on moving
+        // VC-1 and MPEG-2 pictures - never on a paused frame, never on H.264
+        // (same core) or HEVC. Software decode is clean and cheap at 1080p.
+        CLog::Log(LOGINFO, "{}: VC-1/WMV3 on S6 is decoded in software (VDEC artifacts)",
+                  __MODULE_NAME__);
+        goto FAIL;
+      }
+      m_pFormatName = m_hints.codec == AV_CODEC_ID_VC1 ? "am-vc1" : "am-wmv3";
       break;
     case AV_CODEC_ID_AVS:
     case AV_CODEC_ID_CAVS:
