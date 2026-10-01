@@ -6969,6 +6969,12 @@ bool CVideoPlayer::IsInMenu() const
   return m_State.isInMenu;
 }
 
+bool CVideoPlayer::IsInDiscMenu() const
+{
+  std::unique_lock lock(m_StateSection);
+  return m_State.isInDiscMenu;
+}
+
 MenuType CVideoPlayer::GetSupportedMenuType() const
 {
   std::unique_lock lock(m_StateSection);
@@ -7383,6 +7389,7 @@ void CVideoPlayer::UpdatePlayState(double timeout)
   state.canseek = false;
   state.cantempo = false;
   state.isInMenu = false;
+  state.isInDiscMenu = false;
   state.menuType = MenuType::NONE;
 
   if (m_pInputStream)
@@ -7491,6 +7498,15 @@ void CVideoPlayer::UpdatePlayState(double timeout)
           state.time_offset = 0;
       }
       state.menuType = pMenu->GetSupportedMenuType();
+
+      // The disc's own menu is what plays (CDVDInputStreamBluray::
+      // IsInDiscMenu); any other menu stream's menu state.
+#if defined(HAVE_LIBBLURAY)
+      if (m_pInputBluray && m_pInputBluray->IsNavigationMode())
+        state.isInDiscMenu = m_pInputBluray->IsInDiscMenu();
+      else
+#endif
+        state.isInDiscMenu = state.isInMenu;
     }
 
     state.canpause = m_pInputStream->CanPause();

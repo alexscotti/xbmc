@@ -707,6 +707,16 @@ bool CVideoGUIInfo::GetLabel(std::string& value,
     case VIDEOPLAYER_HDR_DETAIL:
       value = m_videoInfo.hdrDetail;
       return true;
+    case VIDEOPLAYER_DISC_MENU_STATE:
+      // "menu" while the disc's own menu plays, "title" while anything else on
+      // a disc with menus plays, "" otherwise. A string rather than only the
+      // InDiscMenu boolean so a caller can tell this Kodi from one without it:
+      // every Kodi answers an unknown boolean "false", an unknown label "".
+      if (m_appPlayer->GetSupportedMenuType() == MenuType::NONE)
+        value.clear();
+      else
+        value = m_appPlayer->IsInDiscMenu() ? "menu" : "title";
+      return true;
     case VIDEOPLAYER_AUDIO_CODEC:
       value = m_audioInfo.codecName;
       return true;
@@ -959,6 +969,9 @@ bool CVideoGUIInfo::GetBool(bool& value,
       return true;
     case VIDEOPLAYER_HASMENU:
       value = m_appPlayer->GetSupportedMenuType() != MenuType::NONE;
+      return true;
+    case VIDEOPLAYER_IN_DISC_MENU:
+      value = m_appPlayer->IsInDiscMenu();
       return true;
     case VIDEOPLAYER_HASTELETEXT:
       value = m_appPlayer->HasTeletextCache();

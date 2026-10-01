@@ -402,6 +402,14 @@ public:
    * IsInMenu(); demux-side machinery (ShouldDiscardStreamQueue,
    * IsMenuDomainVideo) keeps reading m_menu directly. */
   void SetPresentedMenuState(bool menu) { m_menuPresented = menu; }
+  /* The disc's own menu is what plays: its top-menu title, or a menu the
+   * disc raised - the m_menu the queue decisions (title->menu, menu->title)
+   * classify by - and not a pop-up menu over content. Not IsInMenu(), which
+   * BD-J titles hold true through a whole film (their overlay plane), nor
+   * IsMenuDomainVideo(), which calls a long BD-J menu loop (Gods of Egypt
+   * 2:13:36, John Wick 3 2:30:59) a feature. Demux-side: it flips when the
+   * next segment is read, at most one queue depth before the picture. */
+  bool IsInDiscMenu() const { return m_navmode && m_menu && !m_popupAvailable; }
 
   /* presentation-side playlist identity (see BlurayTitleUiSnapshot): applied
    * by the player's timeline queue when the render clock reaches the demux

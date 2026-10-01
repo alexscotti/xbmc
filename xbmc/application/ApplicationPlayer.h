@@ -127,6 +127,7 @@ public:
   bool HasRDS() const;
   bool IsCaching() const;
   bool IsInMenu() const;
+  bool IsInDiscMenu() const;
   bool IsPaused() const;
   bool IsPausedPlayback() const;
   bool IsPassthrough() const;

@@ -458,6 +458,12 @@ bool CApplicationPlayer::IsInMenu() const
   return (player && player->IsInMenu());
 }
 
+bool CApplicationPlayer::IsInDiscMenu() const
+{
+  std::shared_ptr<const IPlayer> player = GetInternal();
+  return (player && player->IsInDiscMenu());
+}
+
 MenuType CApplicationPlayer::GetSupportedMenuType() const
 {
   std::shared_ptr<const IPlayer> player = GetInternal();

@@ -200,6 +200,11 @@ public:
   virtual int GetCacheLevel() const { return -1; }
 
   virtual bool IsInMenu() const { return false; }
+  /*! \brief True while the disc's own menu is what plays (its top menu, or a
+   * menu it raised) and false in the feature, in intros, and under a pop-up
+   * menu over content. Unlike IsInMenu(), which BD-J titles hold true for a
+   * whole film. */
+  virtual bool IsInDiscMenu() const { return false; }
 
   /*!
    * \brief Get the supported menu type

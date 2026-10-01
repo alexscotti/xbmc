@@ -4343,7 +4343,7 @@ constexpr std::array<InfoMap, 46> musicplayer = {{
 ///
 /// -----------------------------------------------------------------------------
 // clang-format off
-constexpr std::array<InfoMap, 88> videoplayer = {{
+constexpr std::array<InfoMap, 90> videoplayer = {{
     {"title",                 VIDEOPLAYER_TITLE},
     {"genre",                 VIDEOPLAYER_GENRE},
     {"country",               VIDEOPLAYER_COUNTRY},
@@ -4428,6 +4428,8 @@ constexpr std::array<InfoMap, 88> videoplayer = {{
     {"art",                   VIDEOPLAYER_ART},
     {"videoversionname",      VIDEOPLAYER_VIDEOVERSION_NAME},
     {"hasvideoversions",      VIDEOPLAYER_HAS_VIDEOVERSIONS},
+    {"indiscmenu",            VIDEOPLAYER_IN_DISC_MENU},
+    {"discmenustate",         VIDEOPLAYER_DISC_MENU_STATE},
     {"episodepart",           VIDEOPLAYER_EPISODEPART},
     {"mediaproviders",        VIDEOPLAYER_MEDIAPROVIDERS},
     {"titleextrainfo",        VIDEOPLAYER_TITLE_EXTRAINFO},

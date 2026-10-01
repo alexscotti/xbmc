@@ -316,6 +316,8 @@ constexpr uint32_t VIDEOPLAYER_HAS_INFO              = 308;
 constexpr uint32_t VIDEOPLAYER_HASTELETEXT           = 309;
 constexpr uint32_t VIDEOPLAYER_IS_STEREOSCOPIC       = 310;
 constexpr uint32_t VIDEOPLAYER_HAS_VIDEOVERSIONS     = 311;
+constexpr uint32_t VIDEOPLAYER_IN_DISC_MENU          = 397;
+constexpr uint32_t VIDEOPLAYER_DISC_MENU_STATE       = 398;
 
 // PVR infolabels
 constexpr uint32_t VIDEOPLAYER_TITLE_EXTRAINFO       = 312;
