@@ -10,9 +10,12 @@
 
 #include <string.h>
 #include <float.h>
+#include <cmath>
 #include <exception>
 
 #include "ServiceBroker.h"
+#include "application/ApplicationComponents.h"
+#include "application/ApplicationPlayer.h"
 #include "cores/RetroPlayer/process/amlogic/RPProcessInfoAmlogic.h"
 #include "cores/RetroPlayer/rendering/VideoRenderers/RPRendererOpenGLES.h"
 #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.h"
@@ -231,6 +234,20 @@ void CWinSystemAmlogic::HotplugEvent()
   std::string preferred_mode = m_amlDisplay->aml_get_preferred_mode();
   RESOLUTION res = static_cast<RESOLUTION>(RES_DESKTOP);
 
+  // A reconnect while a video plays is almost always the HDMI chain switching
+  // inputs as the film starts (an AVR or switcher selecting this box), not a
+  // different display. Below, the mode falls back to the boot-time preferred
+  // mode, which throws away the mode the film chose - and the stereo mode is
+  // kept, so a 1080p frame-packed 3D film came back as 2160p frame packing,
+  // which no sink accepts (black screen). Remember the film's mode by value:
+  // RefreshResolutions renumbers the list.
+  const auto appPlayer = CServiceBroker::GetAppComponents().GetComponent<CApplicationPlayer>();
+  const bool playingVideo = appPlayer && appPlayer->IsPlayingVideo();
+  RESOLUTION_INFO playingRes;
+  if (playingVideo)
+    playingRes = CDisplaySettings::GetInstance().GetResolutionInfo(
+        CServiceBroker::GetWinSystem()->GetGfxContext().GetVideoResolution());
+
   CDisplaySettings::GetInstance().ClearCustomResolutions();
   RefreshResolutions();
   CDisplaySettings::GetInstance().ApplyCalibrations();
@@ -253,6 +270,33 @@ void CWinSystemAmlogic::HotplugEvent()
   else
     CLog::Log(LOGWARNING, "CWinSystemAmlogic - HotplugEvent, no preferred mode defined, use display mode: {}",
       CDisplaySettings::GetInstance().GetResolutionInfo(res).strId);
+
+  if (playingVideo)
+  {
+    // The same mode the film was using: name, refresh rate (the fractional
+    // rates share a name with the integer ones) and 3D layout.
+    RESOLUTION keep = RES_INVALID;
+    for (size_t r = RES_DESKTOP; r < CDisplaySettings::GetInstance().ResolutionInfoSize(); r++)
+    {
+      const RESOLUTION_INFO& info = CDisplaySettings::GetInstance().GetResolutionInfo(r);
+      if (StringUtils::EqualsNoCase(info.strId, playingRes.strId) &&
+          std::fabs(info.fRefreshRate - playingRes.fRefreshRate) < 0.01f &&
+          (info.dwFlags & D3DPRESENTFLAG_MODEMASK) == (playingRes.dwFlags & D3DPRESENTFLAG_MODEMASK))
+      {
+        keep = static_cast<RESOLUTION>(r);
+        break;
+      }
+    }
+    if (keep != RES_INVALID)
+    {
+      CLog::Log(LOGINFO, "CWinSystemAmlogic - HotplugEvent during playback, keeping the video's mode: {}",
+        CDisplaySettings::GetInstance().GetResolutionInfo(keep).strMode);
+      res = keep;
+    }
+    else
+      CLog::Log(LOGWARNING, "CWinSystemAmlogic - HotplugEvent during playback, video's mode {} ({}) not offered after reconnect, using: {}",
+        playingRes.strId, playingRes.strMode, CDisplaySettings::GetInstance().GetResolutionInfo(res).strId);
+  }
 
   m_amlDisplay->SetHotPlug();
   CServiceBroker::GetWinSystem()->GetGfxContext().SetVideoResolution(res, true);
