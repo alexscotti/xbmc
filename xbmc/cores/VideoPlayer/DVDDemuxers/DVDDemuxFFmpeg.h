@@ -99,6 +99,9 @@ public:
 
   DemuxPacket* Read() override;
   DemuxPacket* ReadInternal(bool keep);
+  // set by ReadInternal when the packet it read belonged to a stream outside
+  // the selected program and was dropped (see Read)
+  bool m_droppedOutsideProgram = false;
 
   bool SeekTime(double time, bool backwards = false, double* startpts = NULL) override;
   bool SeekByte(int64_t pos);

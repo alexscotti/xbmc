@@ -1259,7 +1259,10 @@ DemuxPacket* CDVDDemuxFFmpeg::ReadInternal(bool keep)
             }
 
             if (!pPacket)
+            {
               bReturnEmpty = true;
+              m_droppedOutsideProgram = true;
+            }
           }
           else
             pPacket = CDVDDemuxUtils::AllocateDemuxPacket(m_pkt.pkt.size);
@@ -1407,7 +1410,25 @@ DemuxPacket* CDVDDemuxFFmpeg::ReadInternal(bool keep)
 
 DemuxPacket* CDVDDemuxFFmpeg::Read()
 {
-  return ReadInternal(false);
+  // A packet of a stream outside the selected program is data the demuxer has
+  // consumed and dropped - progress, not a source that cannot keep up. Returned
+  // as one empty packet each, the player throttles them (10 ms per empty packet
+  // after ten in a row), and a run of them becomes a stall. Blu-ray produces
+  // exactly that: libbluray relabels the PES of a clip that lie beyond the
+  // playitem's OUT time as PID 0x1FFF, and ffmpeg demuxes them as a stream of
+  // their own. Gods of Egypt (2016) UHD's Lionsgate intro carries 145 s of
+  // DTS-HD MA past its 21.6 s of video - 35 MB - and the player crawled
+  // through it for 137 s of black and silence before the disc's next title.
+  // So keep reading past them here, bounded so the player loop still runs.
+  for (int i = 0; i < 1024; ++i)
+  {
+    m_droppedOutsideProgram = false;
+    DemuxPacket* packet = ReadInternal(false);
+    if (!m_droppedOutsideProgram || !packet || packet->iSize != 0)
+      return packet;
+    CDVDDemuxUtils::FreeDemuxPacket(packet);
+  }
+  return CDVDDemuxUtils::AllocateDemuxPacket(0);
 }
 
 bool CDVDDemuxFFmpeg::SeekTime(double time, bool backwards, double* startpts)
