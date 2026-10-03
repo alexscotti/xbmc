@@ -490,7 +490,10 @@ void CActiveAE::StateMachine(int signal, Protocol *port, Message *msg)
           CActiveAEStream *stream;
           stream = *(CActiveAEStream**)msg->data;
           stream->m_drain = true;
-          stream->m_processingBuffers->SetDrain(true);
+          // a stream that arrived while the sink would not open (AE_TOP_ERROR) never got
+          // its buffers: Configure() bailed first. Dereferencing them here was a SIGSEGV
+          if (stream->m_processingBuffers)
+            stream->m_processingBuffers->SetDrain(true);
           msg->Reply(CActiveAEDataProtocol::ACC);
           stream->m_streamPort->SendInMessage(CActiveAEDataProtocol::STREAMDRAINED);
           return;
@@ -944,7 +947,8 @@ void CActiveAE::StateMachine(int signal, Protocol *port, Message *msg)
         case CActiveAEDataProtocol::DRAINSTREAM:
           stream = *(CActiveAEStream**)msg->data;
           stream->m_drain = true;
-          stream->m_processingBuffers->SetDrain(true);
+          if (stream->m_processingBuffers)
+            stream->m_processingBuffers->SetDrain(true);
           m_extTimeout = 0ms;
           m_state = AE_TOP_CONFIGURED_PLAY;
           msg->Reply(CActiveAEDataProtocol::ACC);
