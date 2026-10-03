@@ -582,6 +582,104 @@ void CActiveAE::StateMachine(int signal, Protocol *port, Message *msg)
             m_extErrorRetries = 0;
             m_extTimeout = 0ms;
             return;
+          // The player keeps driving its stream while the sink will not open. Left to
+          // AE_TOP these were dropped: a flush cost the caller its 1s reply timeout
+          // every time, and pause state and stream parameters were lost for when the
+          // sink comes back. Streams here may never have had their buffers.
+          case CActiveAEControlProtocol::FLUSHSTREAM:
+          {
+            CActiveAEStream* stream = *(CActiveAEStream**)msg->data;
+            SFlushStream(stream);
+            msg->Reply(CActiveAEControlProtocol::ACC);
+            return;
+          }
+          case CActiveAEControlProtocol::PAUSESTREAM:
+          {
+            CActiveAEStream* stream = *(CActiveAEStream**)msg->data;
+            stream->m_paused = true;
+            return;
+          }
+          case CActiveAEControlProtocol::RESUMESTREAM:
+          {
+            CActiveAEStream* stream = *(CActiveAEStream**)msg->data;
+            if (stream->m_paused)
+              stream->m_syncState = CAESyncInfo::AESyncState::SYNC_START;
+            stream->m_paused = false;
+            return;
+          }
+          case CActiveAEControlProtocol::STREAMAMP:
+          {
+            MsgStreamParameter* par = reinterpret_cast<MsgStreamParameter*>(msg->data);
+            par->stream->m_limiter.SetAmplification(par->parameter.float_par);
+            par->stream->m_amplify = par->parameter.float_par;
+            return;
+          }
+          case CActiveAEControlProtocol::STREAMVOLUME:
+          {
+            MsgStreamParameter* par = reinterpret_cast<MsgStreamParameter*>(msg->data);
+            par->stream->m_volume = par->parameter.float_par;
+            return;
+          }
+          case CActiveAEControlProtocol::STREAMRGAIN:
+          {
+            MsgStreamParameter* par = reinterpret_cast<MsgStreamParameter*>(msg->data);
+            par->stream->m_rgain = par->parameter.float_par;
+            return;
+          }
+          case CActiveAEControlProtocol::STREAMFFMPEGINFO:
+          {
+            MsgStreamFFmpegInfo* info = reinterpret_cast<MsgStreamFFmpegInfo*>(msg->data);
+            info->stream->m_profile = info->profile;
+            info->stream->m_matrixEncoding = info->matrix_encoding;
+            info->stream->m_audioServiceType = info->audio_service_type;
+            return;
+          }
+          default:
+            break;
+        }
+      }
+      else if (port == &m_dataPort)
+      {
+        switch (signal)
+        {
+          // A new stream is the way out: the format that would not open is usually
+          // the old stream's (a passthrough format change, a stream switch). Without
+          // this the request went unanswered - the player blocked 10s and got no
+          // stream - while the timer kept retrying the format that had failed.
+          case CActiveAEDataProtocol::NEWSTREAM:
+          {
+            MsgStreamNew* streamMsg = reinterpret_cast<MsgStreamNew*>(msg->data);
+            CActiveAEStream* stream = CreateStream(streamMsg);
+            if (!stream)
+            {
+              msg->Reply(CActiveAEDataProtocol::ERR);
+              return;
+            }
+            msg->Reply(CActiveAEDataProtocol::ACC, &stream, sizeof(CActiveAEStream*));
+            m_extError = false;
+            LoadSettings(&streamMsg->format);
+            Configure();
+            if (!m_extError)
+            {
+              CLog::LogF(LOGINFO, "sink opened for the new stream, leaving the error state");
+              m_extErrorRetries = 0;
+              m_state = AE_TOP_CONFIGURED_PLAY;
+              m_extTimeout = 0ms;
+            }
+            else
+              m_extTimeout = ErrorRetryDelay(++m_extErrorRetries);
+            return;
+          }
+          // a stream that was configured before the sink failed can still hand back
+          // a filled buffer; with no sink to play it, return it to its pool
+          case CActiveAEDataProtocol::STREAMSAMPLE:
+          {
+            MsgStreamSample* msgData = reinterpret_cast<MsgStreamSample*>(msg->data);
+            if (!msgData->stream->m_processingSamples.empty())
+              msgData->stream->m_processingSamples.pop_front();
+            msgData->buffer->Return();
+            return;
+          }
           default:
             break;
         }
@@ -1699,7 +1797,9 @@ void CActiveAE::SFlushStream(CActiveAEStream *stream)
     stream->m_processingSamples.front()->Return();
     stream->m_processingSamples.pop_front();
   }
-  stream->m_processingBuffers->Flush();
+  // no buffers when the stream arrived while the sink would not open
+  if (stream->m_processingBuffers)
+    stream->m_processingBuffers->Flush();
   stream->m_streamPort->Purge();
   stream->m_bufferedTime = 0.0;
   stream->m_paused = false;
@@ -1728,8 +1828,8 @@ void CActiveAE::SFlushStream(CActiveAEStream *stream)
     stream->m_processingBuffers->SetRR(1.0, m_settings.atempoThreshold);
   }
 
-  // flush the engine if we only have a single stream
-  if (m_streams.size() == 1)
+  // flush the engine if we only have a single stream - and a sink to flush
+  if (m_streams.size() == 1 && m_state != AE_TOP_ERROR)
   {
     FlushEngine();
   }
