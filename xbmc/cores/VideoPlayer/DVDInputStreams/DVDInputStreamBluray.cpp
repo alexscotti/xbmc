@@ -790,6 +790,8 @@ bool CDVDInputStreamBluray::Open()
 // close file and reset everything
 void CDVDInputStreamBluray::Close()
 {
+  m_heldItemBytes.clear();
+  m_heldItemOffset = 0;
   aml_dv_set_disc_session(false);
   // Before bd_close(): it can still issue read_blocks(), which must find the
   // cache gone and go straight to the file rather than race the worker.
@@ -1089,6 +1091,8 @@ void CDVDInputStreamBluray::ProcessEvent() {
   case BD_EVENT_END_OF_TITLE:
     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_END_OF_TITLE {}", m_event.param);
     /* when a title ends, playlist WILL eventually change */
+    if (m_titleInfo)
+      m_endedTitleDurationMs = m_titleInfo->duration / 90;
     FreeTitleInfo();
     if (m_bdjTiming)
     {
@@ -1414,6 +1418,19 @@ void CDVDInputStreamBluray::StampBdjPending()
 #if defined(BD_BDJ_PRESENTATION_TIMING)
   if (!m_bdjTiming || !IsBdjTitle())
     return;
+  // While the demuxer opens, nothing read has reached the player yet: a stamp
+  // taken now is NOPTS and releases at once, so a playlist read whole during
+  // the open (A.I.'s 00020.mpls) tells the application it ended before its
+  // first picture. The first read after the open comes once the packets the
+  // open buffered have been delivered, and stamps the batch there.
+  if (m_demuxerOpening)
+    return;
+  if (m_bdjEndNotBefore)
+  {
+    if (std::chrono::steady_clock::now() < *m_bdjEndNotBefore)
+      return;
+    m_bdjEndNotBefore.reset();
+  }
   uint32_t seq = bd_bdj_pending_seq(m_bd);
   if (seq == 0 || seq == m_bdjStampedSeq)
     return;
@@ -1627,7 +1644,11 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
         || m_hold == HOLD_EXIT)
         return -1;
 
-      result = bd_read_ext (m_bd, buf, buf_size, &m_event);
+      result = TakeHeldItemBytes(buf, buf_size);
+      if (result > 0)
+        m_event.event = BD_EVENT_NONE;
+      else
+        result = bd_read_ext(m_bd, buf, buf_size, &m_event);
 
       if(result < 0)
       {
@@ -1638,7 +1659,31 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
       StampBdjPending();
 
       if (HoldForEvent())
+      {
+        // libbluray splits reads at the clip boundary, so the read that raises
+        // BD_EVENT_PLAYITEM returns only the incoming playitem's first bytes
+        // (PAT/PMT and the start of its first access unit). Returning them to
+        // the outgoing demuxer loses them: a rebuilt demuxer never sees the
+        // first access unit's start, and on a single-frame still playitem
+        // (A.I. Artificial Intelligence's menu, 00001.mpls) that is the
+        // sequence header the stream can only open with - the video stream is
+        // disabled and the menu stays black. The continuity break they cause
+        // also marks the outgoing clip's last, complete PES corrupt. Keep them
+        // for the first read after the hold.
+        if (result > 0 && m_event.event == BD_EVENT_PLAYITEM && m_hold == HOLD_HELD)
+        {
+          m_heldItemBytes.assign(buf, buf + result);
+          m_heldItemOffset = 0;
+          m_heldItemEndPos = bd_tell(m_bd);
+          m_heldItemPlaylist = m_playlist;
+          CLog::Log(LOGDEBUG,
+                    "CDVDInputStreamBluray - holding {} bytes of playitem {} for the next "
+                    "segment",
+                    result, m_event.param);
+          return 0;
+        }
         return result;
+      }
 
       // bd_read_ext can return data AND an event from one call (bluray.c
       // _read_ext reads, then takes the next event). The carry guard in
@@ -1647,6 +1692,9 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
       m_carryAtRead = m_seamlessCarry && m_hold == HOLD_DATA;
       if(result > 0)
       {
+        if (m_demuxerOpening)
+          m_demuxerOpenBytes += static_cast<uint64_t>(result);
+        m_bdjEndNotBefore.reset();
         m_hold = HOLD_NONE;
         m_seamlessCarry = false;
         m_bdjEndOfTitleRead = false;
@@ -1662,7 +1710,37 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
       // BD-J application (end of playlist, no playlist)
       if (result == 0 && (event == BD_EVENT_NONE || event == BD_EVENT_END_OF_TITLE ||
                           event == BD_EVENT_IDLE))
+      {
+        // A BD-J playlist short enough to be read to its end while the demuxer
+        // is still opening on it (A.I. Artificial Intelligence's 10s menu
+        // transition, 00020.mpls, is 276 KB): the application waits for the
+        // picture to reach the end, and the picture cannot start until the
+        // demuxer's open returns. Report the end of the data so the open
+        // completes; the next read waits here as usual, with the streams open.
+        // Only once this open has had data: an open that starts before the
+        // application picks its next playlist has to wait for it (Superman
+        // 1978's menu), or the format probe fails on nothing.
+        if (m_demuxerOpening && m_demuxerOpenBytes > 0 && m_bdjEndOfTitleRead && IsBdjTitle())
+        {
+          // Nothing of it is on screen yet, and the player clock is still on
+          // the previous segment's timeline, so a stamp would release at once:
+          // the application would hear "end of playlist" before its player
+          // has started, and libbluray drops it then (BDHandler only posts
+          // EndOfMediaEvent from Started) - A.I. waited on 00020's end forever.
+          // Give the playlist its running time first, as a disc player would.
+          if (!m_bdjEndNotBefore)
+          {
+            m_bdjEndNotBefore = std::chrono::steady_clock::now() +
+                                std::chrono::milliseconds(m_endedTitleDurationMs);
+            CLog::Log(LOGDEBUG,
+                      "CDVDInputStreamBluray - playlist {} read whole while the demuxer "
+                      "opened: holding its BD-J notifications for {} ms",
+                      m_playlist, m_endedTitleDurationMs);
+          }
+          return 0;
+        }
         WaitForBdjPresentation();
+      }
 
     } while(result == 0);
 
@@ -1680,6 +1758,35 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
     }
   }
   return result;
+}
+
+int CDVDInputStreamBluray::TakeHeldItemBytes(uint8_t* buf, int buf_size)
+{
+  if (m_heldItemOffset >= m_heldItemBytes.size())
+    return 0;
+
+  // A seek or playlist change while the stream was held moved the reader away
+  // from where these bytes belong.
+  if (bd_tell(m_bd) != m_heldItemEndPos || m_playlist != m_heldItemPlaylist)
+  {
+    CLog::Log(LOGDEBUG,
+              "CDVDInputStreamBluray - dropping {} held playitem bytes: position changed",
+              m_heldItemBytes.size() - m_heldItemOffset);
+    m_heldItemBytes.clear();
+    m_heldItemOffset = 0;
+    return 0;
+  }
+
+  const size_t n =
+      std::min(static_cast<size_t>(buf_size), m_heldItemBytes.size() - m_heldItemOffset);
+  memcpy(buf, m_heldItemBytes.data() + m_heldItemOffset, n);
+  m_heldItemOffset += n;
+  if (m_heldItemOffset >= m_heldItemBytes.size())
+  {
+    m_heldItemBytes.clear();
+    m_heldItemOffset = 0;
+  }
+  return static_cast<int>(n);
 }
 
 int CDVDInputStreamBluray::ReadBlocks(uint8_t* buf, int lba, int num_blocks)
@@ -2706,6 +2813,7 @@ CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
   // a new transition is under way; the player re-arms the carry only if it
   // takes the SEAMLESS path again
   m_seamlessCarry = false;
+  m_bdjEndNotBefore.reset();
 
   /* process any current event */
   ProcessEvent();

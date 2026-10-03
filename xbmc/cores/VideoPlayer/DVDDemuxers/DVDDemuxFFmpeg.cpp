@@ -294,6 +294,25 @@ bool CDVDDemuxFFmpeg::Open(const std::shared_ptr<CDVDInputStream>& pInput, bool 
   m_pInput = pInput;
   strFile = m_pInput->GetFileName();
 
+  // the Blu-ray reader must not wait on the disc's BD-J application inside
+  // this open (see CDVDInputStreamBluray::Read)
+  struct BlurayOpening
+  {
+    std::shared_ptr<CDVDInputStreamBluray> bluray;
+    explicit BlurayOpening(std::shared_ptr<CDVDInputStreamBluray> b) : bluray(std::move(b))
+    {
+      if (bluray)
+        bluray->SetDemuxerOpening(true);
+    }
+    ~BlurayOpening()
+    {
+      if (bluray)
+        bluray->SetDemuxerOpening(false);
+    }
+  } blurayOpening(m_pInput->IsStreamType(DVDSTREAM_TYPE_BLURAY)
+                      ? std::static_pointer_cast<CDVDInputStreamBluray>(m_pInput)
+                      : nullptr);
+
   if (!m_pInput->GetContent().empty())
   {
     std::string content = m_pInput->GetContent();

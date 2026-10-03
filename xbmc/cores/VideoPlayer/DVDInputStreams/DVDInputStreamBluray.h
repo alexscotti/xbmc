@@ -324,6 +324,13 @@ public:
    * ~24s segment. Cleared by any playlist-scope event (playlist/title/seek/
    * angle), so playlist changes and seeks still take the full reopen. */
   bool IsSeamlessStreamChange() const { return m_seamlessHold; }
+  // set by the demuxer while it opens on this stream (format probe and
+  // stream-info analysis) - see Read()
+  void SetDemuxerOpening(bool opening)
+  {
+    m_demuxerOpening = opening;
+    m_demuxerOpenBytes = 0;
+  }
 
   /* The player took the SEAMLESS path at a held boundary: nothing was rebuilt.
    * Until the next segment's first byte arrives (m_hold == HOLD_DATA), Read()
@@ -533,6 +540,14 @@ protected:
   bool m_seamlessCarry = false;
   // the carry state in force when the current bd_read_ext() call was made (see Read)
   bool m_carryAtRead = false;
+  // Bytes of the NEXT playitem that bd_read_ext() returned together with the
+  // BD_EVENT_PLAYITEM that held the stream (see Read). They are delivered as
+  // the first bytes after the hold, to whichever demuxer reads then.
+  std::vector<uint8_t> m_heldItemBytes;
+  size_t m_heldItemOffset = 0;
+  uint64_t m_heldItemEndPos = 0; // bd_tell() just after the held bytes
+  uint32_t m_heldItemPlaylist = 0;
+  int TakeHeldItemBytes(uint8_t* buf, int buf_size);
   bool HoldForEvent();
   bool ArmSeamlessGlide();
   bool IsBdjTitle() const { return m_title && m_title->bdj; }
@@ -546,6 +561,14 @@ protected:
   bool m_bdjAppJumpAtHold = false;
   /* the reader reached the end of the playlist (END_OF_TITLE) ... */
   bool m_bdjEndOfTitleRead = false;
+  bool m_demuxerOpening = false;
+  uint64_t m_demuxerOpenBytes = 0; // bytes read since the open began
+  // length of the playlist that just ended, kept past FreeTitleInfo (ms)
+  uint64_t m_endedTitleDurationMs = 0;
+  // A BD-J playlist read whole while the demuxer was opening has presented
+  // nothing yet; its notifications are held until it has had its running time
+  // (see Read and StampBdjPending)
+  std::optional<std::chrono::steady_clock::time_point> m_bdjEndNotBefore;
   /* the held batch that marks the end of the data read (the newest held at
    * END_OF_TITLE, else the next stamped - END_OF_PLAYLIST): its release is
    * the picture reaching the end; 0 = none yet */
