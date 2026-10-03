@@ -478,7 +478,11 @@ void CActiveAE::StateMachine(int signal, Protocol *port, Message *msg)
           return;
         case CActiveAEDataProtocol::FREESTREAM:
           MsgStreamFree *msgStreamFree;
-          msgStreamFree = *(MsgStreamFree**)msg->data;
+          // the message carries the struct, not a pointer to it (FreeStream). Read as a
+          // pointer, the "stream" was the stream object's first word: nothing matched,
+          // nothing was freed, and in AE_TOP_ERROR the dead stream then refused every
+          // new passthrough stream (CreateStream allows one)
+          msgStreamFree = reinterpret_cast<MsgStreamFree*>(msg->data);
           DiscardStream(msgStreamFree->stream);
           msg->Reply(CActiveAEDataProtocol::ACC);
           return;
