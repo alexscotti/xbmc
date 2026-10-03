@@ -1194,7 +1194,27 @@ DemuxPacket* CDVDDemuxFFmpeg::ReadInternal(bool keep)
         // The drop must cost exactly this one packet: falling into the
         // generic result<0 Flush() below discarded adjacent good PES of ALL
         // streams per corrupt packet (review finding A3).
+        //
+        // PID 0x1FFF is not a stream: libbluray's m2ts filter relabels to it
+        // every PID's units before a seek point (the resume seek, or the seek
+        // a BD-J title makes as the feature starts) and past a playitem's OUT
+        // time. PES of many PIDs then share it and fail ffmpeg's size check -
+        // Superman 1978 and 2001 put 4-43 of them in the log at every feature
+        // start. They are outside the program and never delivered, so drop
+        // them the way ReadInternal drops any packet outside it: silently.
         if (m_pkt.result >= 0 && (m_pkt.pkt.flags & AV_PKT_FLAG_CORRUPT) &&
+            m_pInput && m_pInput->IsStreamType(DVDSTREAM_TYPE_BLURAY) &&
+            m_pkt.pkt.stream_index >= 0 &&
+            m_pkt.pkt.stream_index < static_cast<int>(m_pFormatContext->nb_streams) &&
+            m_pFormatContext->streams[m_pkt.pkt.stream_index]->id == 0x1FFF)
+        {
+          m_pkt.result = -1;
+          av_packet_unref(&m_pkt.pkt);
+          bReturnEmpty = true;
+          corruptDropped = true;
+          m_droppedOutsideProgram = true;
+        }
+        else if (m_pkt.result >= 0 && (m_pkt.pkt.flags & AV_PKT_FLAG_CORRUPT) &&
             m_pInput && m_pInput->IsStreamType(DVDSTREAM_TYPE_BLURAY))
         {
           CLog::Log(LOGWARNING,
