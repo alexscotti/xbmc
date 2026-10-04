@@ -7499,11 +7499,18 @@ void CVideoPlayer::UpdatePlayState(double timeout)
       }
       state.menuType = pMenu->GetSupportedMenuType();
 
-      // The disc's own menu is what plays (CDVDInputStreamBluray::
-      // IsInDiscMenu); any other menu stream's menu state.
+      // The disc's own menu is what plays: its graphics are up AND it
+      // forbids seeking - exactly when the chapter above reads 0. Neither
+      // half is enough on Blu-ray. The menu flag follows the BD-J graphics
+      // plane, which A.I. Artificial Intelligence keeps open through its
+      // whole film (read "menu" for 2h25m) and 10 Cloverfield Lane's menu
+      // loop leaves closed (read "title" on its 25:22 menu). Discs forbid
+      // time search in their menus and allow it in their films (the UO mask
+      // CanSeek honours), and a pop-up menu over the film stays seekable.
+      // Measured with dvtest/menucheck.py on 15 discs.
 #if defined(HAVE_LIBBLURAY)
       if (m_pInputBluray && m_pInputBluray->IsNavigationMode())
-        state.isInDiscMenu = m_pInputBluray->IsInDiscMenu();
+        state.isInDiscMenu = IsInMenuInternal() && !pMenu->CanSeek();
       else
 #endif
         state.isInDiscMenu = state.isInMenu;
