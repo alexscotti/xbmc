@@ -17,6 +17,8 @@
 #include "cores/VideoPlayer/VideoRenderers/RenderFlags.h"
 #include "cores/VideoPlayer/VideoRenderers/RenderManager.h"
 #include "ServiceBroker.h"
+#include "dialogs/GUIDialogKaiToast.h"
+#include "messaging/ApplicationMessenger.h"
 #include "settings/AdvancedSettings.h"
 #include "settings/DisplaySettings.h"
 #include "settings/MediaSettings.h"
@@ -47,6 +49,8 @@
 #include <sys/poll.h>
 #include <chrono>
 #include <thread>
+#include <fstream>
+#include <sstream>
 #include "aom_integer.h"
 #include "obu_util.h"
 
@@ -2098,6 +2102,9 @@ bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, bool isDualSt
   m_wrFailActive = false;
   // Mirror of CBitstreamConverter's tiny-IDR padding gate; see m_felIdrPadding.
   m_felIdrPadding = doviIsFEL;
+  ResetFelGuard();
+  m_felGuardTripped = false;
+  m_felGuardEligible = false; // decided below, from this stream's hints
   m_park_start = {};
   m_park_reported = false;
   m_park_last_data_len = -1;
@@ -2261,6 +2268,9 @@ bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, bool isDualSt
   bool dv_enable(device_support_dv && !user_dv_disable &&
     hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
     (display_support_dv || hints.dovi.dv_profile == 5 || vs10_active));
+  m_felGuardEligible = device_support_dv && !user_dv_disable && display_support_dv &&
+                       hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
+                       hints.dovi.dv_profile == 7;
   CLog::Log(LOGINFO, "CAMLCodec::OpenDecoder Amlogic device {} support DV, DV is {} by user, display {} support DV, DV system is {}",
     device_support_dv ? "does" : "does not", user_dv_disable ? "disabled" : "enabled",
     display_support_dv ? "does" : "does not", dv_enable ? "enabled" : "disabled");
@@ -2857,6 +2867,7 @@ void CAMLCodec::Reset()
     return;
 
   m_park_last_data_len = -1;
+  ResetFelGuard();
   SetPollDevice(-1);
 
   // set the system blackout_policy to leave the last frame showing
@@ -3300,6 +3311,127 @@ int CAMLCodec::DequeueBuffer()
   return ret;
 }
 
+void CAMLCodec::ResetFelGuard()
+{
+  m_felGuardStart = std::chrono::steady_clock::now();
+  m_felGuardLastPoll = m_felGuardStart;
+  m_felGuardBl0 = m_felGuardEl0 = -1;
+}
+
+namespace
+{
+// Frame counts of the HEVC decoder channels in /sys/class/vdec/vdec_status:
+// a profile 7 dual-layer title runs two, the base layer (the wider picture)
+// and the enhancement layer (half its width), which decode in lockstep -
+// equal counts, off by one frame in flight at most.
+bool ReadDvLayerCounts(int64_t& bl, int64_t& el)
+{
+  std::ifstream in("/sys/class/vdec/vdec_status");
+  if (!in)
+    return false;
+  struct Channel
+  {
+    bool hevc = false;
+    int width = 0;
+    int64_t count = -1;
+  };
+  std::vector<Channel> channels;
+  std::string line;
+  while (std::getline(in, line))
+  {
+    if (line.find("vdec channel") != std::string::npos)
+      channels.emplace_back();
+    else if (channels.empty())
+      continue;
+    else if (line.find("device name") != std::string::npos)
+      channels.back().hevc = line.find("h265") != std::string::npos;
+    else if (line.find("frame width") != std::string::npos)
+      channels.back().width = std::atoi(line.substr(line.find(':') + 1).c_str());
+    else if (line.find("frame count") != std::string::npos)
+      channels.back().count = std::atoll(line.substr(line.find(':') + 1).c_str());
+  }
+  const Channel* base = nullptr;
+  const Channel* enh = nullptr;
+  for (const auto& ch : channels)
+  {
+    if (!ch.hevc || ch.count < 0)
+      continue;
+    if (!base || ch.width > base->width)
+    {
+      enh = base;
+      base = &ch;
+    }
+    else if (!enh || ch.width > enh->width)
+      enh = &ch;
+  }
+  if (!base)
+    return false;
+  bl = base->count;
+  el = enh ? enh->count : 0;
+  return true;
+}
+} // namespace
+
+// A profile 7 FEL title is a base layer plus an enhancement layer that carries
+// real picture (the residual); the base layer alone is a different, wrong
+// picture. Everything upstream works to keep the pair decoding together, but
+// if the enhancement decoder stops anyway - bypassed, starved, never
+// scheduled (John Wick 3 once ran "ready 118462, scheduled 5") - the film
+// would play on silently degraded. Stop it and say why instead.
+//
+// Polled from GetPicture, once a second, only while a Dolby Vision profile 7
+// stream that should play as DV (m_felGuardEligible) reads FEL and plays at
+// normal speed. After 5s of start-up grace, the two decoders'
+// frame counts are compared over windows of at least 96 base-layer frames
+// (4s): an enhancement layer that produced under 3/4 as many frames - or no
+// enhancement decoder at all - trips it. A count that goes backwards is a
+// decoder reopen and starts a new window. MEL titles are never checked: their
+// enhancement layer carries no picture and the DV core bypasses it by design.
+void CAMLCodec::CheckFelEnhancementLayer()
+{
+  using namespace std::chrono_literals;
+  const auto now = std::chrono::steady_clock::now();
+  if (!m_felGuardEligible || !m_felIdrPadding || m_speed != DVD_PLAYSPEED_NORMAL ||
+      m_felGuardTripped)
+  {
+    ResetFelGuard();
+    return;
+  }
+  if (now - m_felGuardLastPoll < 1s || now - m_felGuardStart < 5s)
+    return;
+  m_felGuardLastPoll = now;
+
+  int64_t bl = 0, el = 0;
+  if (!ReadDvLayerCounts(bl, el))
+    return;
+  if (m_felGuardBl0 < 0 || bl < m_felGuardBl0 || el < m_felGuardEl0)
+  {
+    m_felGuardBl0 = bl;
+    m_felGuardEl0 = el;
+    return;
+  }
+  const int64_t dBl = bl - m_felGuardBl0;
+  const int64_t dEl = el - m_felGuardEl0;
+  if (dBl < 96)
+    return;
+  if (dEl * 4 >= dBl * 3)
+  {
+    m_felGuardBl0 = bl;
+    m_felGuardEl0 = el;
+    return;
+  }
+
+  m_felGuardTripped = true;
+  CLog::Log(LOGERROR,
+            "CAMLCodec::CheckFelEnhancementLayer - Dolby Vision FEL title, but the enhancement "
+            "layer decoded {} frames to the base layer's {} (totals EL {} / BL {}): stopping "
+            "playback rather than showing the base layer alone",
+            dEl, dBl, el, bl);
+  CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Error, "Dolby Vision",
+                                        "Enhancement layer not decoding - playback stopped");
+  CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_STOP);
+}
+
 CDVDVideoCodec::VCReturn CAMLCodec::GetPicture(VideoPicture *pVideoPicture)
 {
   int ret = EAGAIN;
@@ -3329,6 +3461,8 @@ CDVDVideoCodec::VCReturn CAMLCodec::GetPicture(VideoPicture *pVideoPicture)
 
   if (!m_opened)
     return CDVDVideoCodec::VC_ERROR;
+
+  CheckFelEnhancementLayer();
 
   // While draining, always attempt the dequeue - drain means no further
   // input is coming, so the fill gates are moot and anything the hardware

@@ -189,6 +189,23 @@ private:
   // benign park into a decoder flush - so the threshold moves with the pad.
   bool            m_felIdrPadding = false;
 
+  // Profile-7 FEL guard: a FEL title whose enhancement layer stops decoding
+  // plays on as base layer alone - a different, wrong picture. Stop instead.
+  // See CheckFelEnhancementLayer.
+  void CheckFelEnhancementLayer();
+  void ResetFelGuard();
+  std::chrono::steady_clock::time_point m_felGuardStart{};
+  std::chrono::steady_clock::time_point m_felGuardLastPoll{};
+  int64_t         m_felGuardBl0 = -1;
+  int64_t         m_felGuardEl0 = -1;
+  bool            m_felGuardTripped = false;
+  // This decoder was opened on a Dolby Vision profile 7 stream that should
+  // play as DV (device and display support it, not disabled by the user).
+  // The FEL flag alone is not enough: CProcessInfo latches it for the life of
+  // the player, which Kodi reuses across files, so it can still say FEL on a
+  // stream that is not Dolby Vision at all (21 Jump Street's HDR10 intro).
+  bool            m_felGuardEligible = false;
+
   // Set by a flush so a write loop in progress gives up. Written from the
   // player thread, read by the video thread.
   std::atomic_bool m_abort{false};
