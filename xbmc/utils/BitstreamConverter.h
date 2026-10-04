@@ -235,6 +235,11 @@ public:
    * full enhancement layer would be re-guessed as MEL at each reopen.
    * The owner seeds what earlier opens established. */
   void SetDoviIsFEL(bool value) { m_doviIsFEL = value; }
+  /* Whether an RPU parsed by THIS converter said FEL. Unlike GetDoviIsFEL(),
+   * never seeded by the owner: a check that must judge the stream being
+   * decoded (CAMLCodec's FEL guard) cannot use a flag carried over from
+   * earlier content. */
+  bool GetDoviFELSeen() const { return m_doviFELSeen; }
   //! @brief Whether the access unit just converted contained an IRAP (IDR/CRA/BLA).
   //! A seamless Blu-ray branch is authored to start on one, and that IRAP is what
   //! resets decoder references. Only the dual-layer overload classifies the unit,
@@ -362,6 +367,7 @@ protected:
   // NONE, so CMV40_SMART means nothing has been logged for this stream yet.
   DOVICMv40Mode m_cmv40_auto_last_effective{CMV40_SMART};
   bool m_doviIsFEL{false};
+  bool m_doviFELSeen{false};
   bool m_lastAuIsIrap = false;
   bool m_lastAuIrapKnown = false;
   bool m_IsHdr10Plus{false};

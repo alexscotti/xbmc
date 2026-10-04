@@ -1069,6 +1069,10 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
                   "{}::{} - enhancement layer now reported as {} - tiny-IDR padding gate updated",
                   __MODULE_NAME__, __FUNCTION__, doviIsFEL ? "FEL" : "MEL");
       }
+      // The FEL guard judges this stream by what this decoder's own RPUs
+      // showed, never by the title-wide latch above.
+      if (m_Codec)
+        m_Codec->SetFelSeen(m_bitstream->GetDoviFELSeen());
       IsHdr10Plus = m_bitstream->GetIsHdrPlus();
       if (IsHdr10Plus && m_stripHdr10Plus &&
           std::find(m_streamMeta.flags.begin(), m_streamMeta.flags.end(), "hdr10plus-removed") ==

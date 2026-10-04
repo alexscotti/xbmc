@@ -2884,15 +2884,22 @@ const DoviData* CBitstreamConverter::processDoviRpu(uint8_t* buf, uint32_t nalSi
   // Re-testing cannot produce a false positive: a genuine MEL stream's el_type
   // never reads "FEL", so this can only ever correct a missed FEL, never invent
   // one. Latching on the positive keeps it a one-way decision.
-  if (!m_doviIsFEL)
+  // Tested on m_doviFELSeen, not m_doviIsFEL: the owner may have seeded
+  // m_doviIsFEL from earlier content, and this converter's own observation is
+  // still wanted (GetDoviFELSeen).
+  if (!m_doviFELSeen)
   {
     if (header->el_type && (header->guessed_profile == 4 || header->guessed_profile == 7))
     {
       if (StringUtils::EqualsNoCase(header->el_type, "FEL"))
       {
-        m_doviIsFEL = true;
-        CLog::Log(LOGINFO, "CBitstreamConverter::processDoviRpu - full enhancement layer "
-                           "detected (profile {})", header->guessed_profile);
+        m_doviFELSeen = true;
+        if (!m_doviIsFEL)
+        {
+          m_doviIsFEL = true;
+          CLog::Log(LOGINFO, "CBitstreamConverter::processDoviRpu - full enhancement layer "
+                             "detected (profile {})", header->guessed_profile);
+        }
       }
     }
   }

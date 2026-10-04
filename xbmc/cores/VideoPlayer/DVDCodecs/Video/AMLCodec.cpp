@@ -2268,9 +2268,11 @@ bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, bool isDualSt
   bool dv_enable(device_support_dv && !user_dv_disable &&
     hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
     (display_support_dv || hints.dovi.dv_profile == 5 || vs10_active));
+  // Dual stream: the enhancement layer is its own PID with its own decoder.
+  // A profile 7 clip without one (some menu clips) has nothing to count.
   m_felGuardEligible = device_support_dv && !user_dv_disable && display_support_dv &&
                        hints.hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION &&
-                       hints.dovi.dv_profile == 7;
+                       hints.dovi.dv_profile == 7 && isDualStream;
   CLog::Log(LOGINFO, "CAMLCodec::OpenDecoder Amlogic device {} support DV, DV is {} by user, display {} support DV, DV system is {}",
     device_support_dv ? "does" : "does not", user_dv_disable ? "disabled" : "enabled",
     display_support_dv ? "does" : "does not", dv_enable ? "enabled" : "disabled");
@@ -3379,9 +3381,10 @@ bool ReadDvLayerCounts(int64_t& bl, int64_t& el)
 // scheduled (John Wick 3 once ran "ready 118462, scheduled 5") - the film
 // would play on silently degraded. Stop it and say why instead.
 //
-// Polled from GetPicture, once a second, only while a Dolby Vision profile 7
-// stream that should play as DV (m_felGuardEligible) reads FEL and plays at
-// normal speed. After 5s of start-up grace, the two decoders'
+// Polled from GetPicture, once a second, only while a dual-stream Dolby Vision
+// profile 7 stream that should play as DV (m_felGuardEligible) plays at
+// normal speed and this decoder's own RPUs have said FEL (m_felSeen - not the
+// title-wide latch, which can carry FEL from a menu into a MEL feature). After 5s of start-up grace, the two decoders'
 // frame counts are compared over windows of at least 96 base-layer frames
 // (4s): an enhancement layer that produced under 3/4 as many frames - or no
 // enhancement decoder at all - trips it. A count that goes backwards is a
@@ -3391,7 +3394,7 @@ void CAMLCodec::CheckFelEnhancementLayer()
 {
   using namespace std::chrono_literals;
   const auto now = std::chrono::steady_clock::now();
-  if (!m_felGuardEligible || !m_felIdrPadding || m_speed != DVD_PLAYSPEED_NORMAL ||
+  if (!m_felGuardEligible || !m_felSeen || m_speed != DVD_PLAYSPEED_NORMAL ||
       m_felGuardTripped)
   {
     ResetFelGuard();

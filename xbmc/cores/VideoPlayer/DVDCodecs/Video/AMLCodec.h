@@ -83,6 +83,8 @@ public:
   //! it does not, the idle-input threshold is short by exactly the filler size
   //! and a benign park falls through to a decoder flush.
   void          SetFelIdrPadding(bool enabled) { m_felIdrPadding = enabled; }
+  // an RPU of THIS stream said FEL (CBitstreamConverter::GetDoviFELSeen)
+  void          SetFelSeen(bool seen) { m_felSeen = seen; }
 
   void          SetSpeed(int speed);
   void          SetDrain(bool drain){m_drain = drain;};
@@ -205,6 +207,7 @@ private:
   // the player, which Kodi reuses across files, so it can still say FEL on a
   // stream that is not Dolby Vision at all (21 Jump Street's HDR10 intro).
   bool            m_felGuardEligible = false;
+  bool            m_felSeen = false;
 
   // Set by a flush so a write loop in progress gives up. Written from the
   // player thread, read by the video thread.
