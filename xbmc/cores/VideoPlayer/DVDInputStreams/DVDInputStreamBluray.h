@@ -622,6 +622,11 @@ protected:
   uint32_t m_pgStreamNum = BD_STREAM_NONE;
   bool m_hasBdjTitles = false;
   bool m_isInMainMenu = false;
+  /* BD_EVENT_MENU 1 since the last BD_EVENT_PLAYLIST: on BD-J that is the
+   * application opening its graphics plane (ARGB INIT) for what plays next,
+   * so the overlay is not one left over from an earlier menu (see the
+   * menu->feature clear in ProcessEvent) */
+  bool m_menuOpenedSincePlaylist = false;
   std::atomic<bool> m_hasOverlay{false};
   // read in OverlayFlush on the JVM graphics thread
   std::atomic<bool> m_bgVisible{true};

@@ -1222,7 +1222,14 @@ void CDVDInputStreamBluray::ProcessEvent() {
     // is untouched during real menu use. Realistic in-feature overlays (PiP /
     // commentary indicators) are drawn AFTER playback starts, i.e. after this
     // clear, so they are unaffected.
-    if (m_hasOverlay && !m_isInMainMenu && !IsMenuDomainVideo())
+    //
+    // Not when the graphics plane was opened since the previous playlist: it
+    // belongs to what is starting, not to a menu left behind. Aliens vs.
+    // Predator: Requiem's menu is a 3h05m background loop (playlist 111, 301
+    // chapters); its application opens the plane and draws the menu, then
+    // starts the loop - and the clear wiped the menu off it for good
+    // (2026-10-06).
+    if (m_hasOverlay && !m_isInMainMenu && !IsMenuDomainVideo() && !m_menuOpenedSincePlaylist)
     {
       CLog::Log(LOGDEBUG,
                 "CDVDInputStreamBluray - menu->feature transition (playlist {}, {}s): "
@@ -1230,6 +1237,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
                 m_playlist, m_titleInfo ? m_titleInfo->duration / 90000 : 0);
       OverlayClose();
     }
+    m_menuOpenedSincePlaylist = false;
     {
       // OSD-visible playlist identity (chapters/total time): timeline-stamped
       // via the player queue so the OSD flips when the render clock reaches
@@ -1293,6 +1301,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
   case BD_EVENT_MENU:
     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - BD_EVENT_MENU {}", m_event.param);
     m_menu = (m_event.param != 0);
+    m_menuOpenedSincePlaylist = m_menu;
     if (!m_menu)
       m_isInMainMenu = false;
     m_player->OnDiscNavResult(&m_event.param, BD_EVENT_MENU);
