@@ -1444,22 +1444,28 @@ void CDVDInputStreamBluray::StampBdjPending()
 }
 
 // At the end of a BD-J playlist the reader has nothing to give until the
-// application picks what plays next, and Read() waits inside this loop for
-// that. With presentation timing the application only hears "end of playlist"
-// once the picture gets there - which needs the player's timeline to run, and
-// the player thread is here. So run it here, and do not spin while waiting.
-void CDVDInputStreamBluray::WaitForBdjPresentation()
+// application picks what plays next. With presentation timing the application
+// only hears "end of playlist" once the picture gets there - which needs the
+// player's timeline to run. Run what of it can be run from here (the clock is
+// its own), and report whether notifications are still held: then Read()
+// hands control back to the player rather than waiting in here, because the
+// clock may not be running at all - paused by stall caching, or not yet
+// synced to the segment just opened - and only the player loop can start it.
+// Fox's 7s MPEG-2 opening (Dodgeball, Alien 3, Hot Tub Time Machine) left
+// the player thread in this loop with the clock paused 15s short of the
+// stamps, and playback hung for good (2026-10-06).
+bool CDVDInputStreamBluray::WaitForBdjPresentation()
 {
 #if defined(BD_BDJ_PRESENTATION_TIMING)
   if (!m_bdjTiming || !IsBdjTitle())
-    return;
+    return false;
   if (bd_bdj_pending_seq(m_bd) != 0)
   {
     m_player->OnDiscNavResult(nullptr, BD_EVENT_BDJ_PRESENTATION_STAMP);
     if (bd_bdj_pending_seq(m_bd) != 0)
     {
       KODI::TIME::Sleep(5ms);
-      return;
+      return true;
     }
   }
   // Everything held is released: the picture reached the end of what was
@@ -1467,6 +1473,17 @@ void CDVDInputStreamBluray::WaitForBdjPresentation()
   // or an application action somewhere inside the read-ahead.
   if (m_bdjEndOfTitleRead)
     m_bdjAtPlaylistEnd = true;
+#endif
+  return false;
+}
+
+bool CDVDInputStreamBluray::IsWaitingForBdjPresentation() const
+{
+#if defined(BD_BDJ_PRESENTATION_TIMING)
+  return m_bd && m_navmode && BdjTimingActive() && m_bdjEndOfTitleRead &&
+         bd_bdj_pending_seq(m_bd) != 0;
+#else
+  return false;
 #endif
 }
 
@@ -1632,6 +1649,7 @@ bool CDVDInputStreamBluray::HoldForEvent()
 int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
 {
   int result = 0;
+  m_bdjPresentationWait = false;
   m_dispTimeBeforeRead = static_cast<int>((bd_tell_time(m_bd) / 90));
   if(m_navmode)
   {
@@ -1739,7 +1757,14 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
           }
           return 0;
         }
-        WaitForBdjPresentation();
+        // Still held for the picture: back to the player loop (NextStream
+        // answers RETRY). Not while the demuxer opens - an open handed no
+        // data fails its format probe (see above); it waits here as before.
+        if (WaitForBdjPresentation() && !m_demuxerOpening)
+        {
+          m_bdjPresentationWait = true;
+          return 0;
+        }
       }
 
     } while(result == 0);
@@ -2803,6 +2828,15 @@ CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
 {
   if(!m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR)
     return NEXTSTREAM_NONE;
+
+  // The read came back empty only to let the player run while the BD-J
+  // application waits for the picture (see WaitForBdjPresentation): no
+  // boundary, nothing to open - read again after the player's loop.
+  if (m_bdjPresentationWait)
+  {
+    m_bdjPresentationWait = false;
+    return NEXTSTREAM_RETRY;
+  }
 
   // Any boundary that reaches here took the HOLD path, and the transition the
   // player is about to run covers it. An earlier glide that the player has not

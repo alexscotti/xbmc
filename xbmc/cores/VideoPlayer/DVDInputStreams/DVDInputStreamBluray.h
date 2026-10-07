@@ -382,6 +382,12 @@ public:
 
   bool IsNavigationMode() const { return m_navmode; }
 
+  /* The reader has read the BD-J playlist to its end and libbluray holds the
+   * application's notifications until the picture gets there (presentation
+   * timing): no more data can arrive before the clock reaches it, so a player
+   * that runs dry now is not starved, and must not pause the clock to refill. */
+  bool IsWaitingForBdjPresentation() const;
+
   bool TakePendingSeamlessTransition()
   {
     const bool pending = m_pendingSeamlessTransition;
@@ -552,8 +558,13 @@ protected:
   bool ArmSeamlessGlide();
   bool IsBdjTitle() const { return m_title && m_title->bdj; }
   void StampBdjPending();
-  void WaitForBdjPresentation();
+  bool WaitForBdjPresentation();
   bool m_bdjTiming = false;
+  /* the last Read() returned no data because the reader is waiting for the
+   * picture to reach held BD-J notifications: NextStream() answers RETRY so
+   * the player runs its loop (messages, sync, caching, the timeline) and
+   * reads again, instead of opening a new segment. Cleared by every Read(). */
+  bool m_bdjPresentationWait = false;
   uint32_t m_bdjStampedSeq = 0;
   /* the BD-J application seeked or started another playlist since the hold
    * was taken (see ClassifyStreamQueue); set in ProcessEvent, cleared when a

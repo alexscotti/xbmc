@@ -2977,8 +2977,17 @@ bool CVideoPlayer::ShouldDeferSync(bool ready, std::chrono::steady_clock::time_p
 void CVideoPlayer::HandlePlaySpeed()
 {
   const bool isInMenu = IsInMenuInternal();
-  const bool tolerateStall =
-      isInMenu || (m_CurrentVideo.hint.flags & StreamFlags::FLAG_STILL_IMAGES);
+  // A BD-J playlist read to its end waits for the picture before the
+  // application hears it ended and picks what plays next: the queues run dry
+  // by design, and caching would pause the very clock the wait is on - the end
+  // of Fox's 9s opening clip (Alien 3) sat there for good (2026-10-06).
+  bool bdjAwaitsPicture = false;
+#if defined(HAVE_LIBBLURAY)
+  bdjAwaitsPicture = m_pInputBluray && m_pInputBluray->IsWaitingForBdjPresentation();
+#endif
+  const bool tolerateStall = isInMenu ||
+                             (m_CurrentVideo.hint.flags & StreamFlags::FLAG_STILL_IMAGES) ||
+                             bdjAwaitsPicture;
 
   if (tolerateStall && m_caching != CACHESTATE_DONE)
     SetCaching(CACHESTATE_DONE);
