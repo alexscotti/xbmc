@@ -92,6 +92,7 @@ public:
   void          SetVideoRate(int videoRate);
   uint64_t      GetOMXPts() const { return m_cur_pts; }
   uint32_t      GetBufferIndex() const { return m_bufferIndex; };
+  bool          LastPictureStarved() const { return m_lastPictureStarved; }
   float         GetBufferLevel(int new_chunk, int &data_len, int &free_len, int &size);
   static float  OMXPtsToSeconds(int omxpts);
   static int    OMXDurationToNs(int duration);
@@ -178,6 +179,9 @@ private:
   // and no frame has come out for a while, dequeue anyway - a short segment can
   // decode a picture and never reach the gate, stranding it in the v4l queue.
   bool            m_starve_bypass = false;
+  // the last picture dequeued came out only because input stopped (starve
+  // probe): a still or a segment tail, possibly the only picture there is
+  bool             m_lastPictureStarved = false;
   bool            m_no_data_since_reset = true;
   // Starve-probe clock: wall time since the fill gate was last open or input
   // last arrived. New input also releases the probe latch (m_starve_bypass).

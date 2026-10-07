@@ -44,7 +44,8 @@ public:
            uint64_t omxPts,
            int amlDuration,
            uint32_t bufferIndex,
-           uint32_t sessionGen)
+           uint32_t sessionGen,
+           bool starved)
   {
     m_codec = codec;
     m_amlCodec = amlcodec;
@@ -52,6 +53,7 @@ public:
     m_amlDuration = amlDuration;
     m_bufferIndex = bufferIndex;
     m_sessionGen = sessionGen;
+    m_starved = starved;
   }
 
   CDVDVideoCodecAmlogic* m_codec;
@@ -62,6 +64,8 @@ public:
   // decode session the buffer belongs to (CAMLCodec::GetSessionGeneration);
   // ReleaseFrame drops indices from closed sessions
   uint32_t m_sessionGen{UINT32_MAX};
+  // dequeued only because input stopped (CAMLCodec::LastPictureStarved)
+  bool m_starved{false};
 };
 
 class CAMLVideoBufferPool : public IVideoBufferPool

@@ -369,8 +369,14 @@ void CRendererAML::RenderUpdate(int index, int index2, bool clear, unsigned int 
     uint64_t pts = amli->m_omxPts;
     if (pts != m_prevVPts)
     {
-      amli->m_amlCodec->ReleaseFrame(amli->m_bufferIndex, m_prevVPts == DVD_NOPTS_VALUE,
-                                     amli->m_sessionGen);
+      // The first frame only configures the render and is dropped - unless
+      // it came out because input stopped: then it may be the only picture
+      // there is. A BD-J still menu's clip (Beavis and Butt-Head Do America's
+      // language screen, 00000.m2ts: one I-frame and a 154-byte P-frame that
+      // never clears the parser's fetch quantum) yields exactly one, and
+      // dropping it left the menu's highlight bars on black (2026-10-07).
+      const bool dropFirst = m_prevVPts == DVD_NOPTS_VALUE && !amli->m_starved;
+      amli->m_amlCodec->ReleaseFrame(amli->m_bufferIndex, dropFirst, amli->m_sessionGen);
       amli->m_amlCodec->SetVideoRect(m_sourceRect, m_destRect);
       amli->m_amlCodec = nullptr; //Mark frame as processed
       m_prevVPts = pts;

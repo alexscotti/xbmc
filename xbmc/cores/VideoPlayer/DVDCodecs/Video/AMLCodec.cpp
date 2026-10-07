@@ -3564,6 +3564,7 @@ CDVDVideoCodec::VCReturn CAMLCodec::GetPicture(VideoPicture *pVideoPicture)
 
   if ((level_gate_open || starve_probe) && (ret = DequeueBuffer()) == 0)
   {
+    m_lastPictureStarved = starve_probe;
     if (starve_probe && !m_starve_bypass)
     {
       m_starve_bypass = true;
