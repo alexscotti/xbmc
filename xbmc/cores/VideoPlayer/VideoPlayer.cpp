@@ -1069,6 +1069,14 @@ bool CVideoPlayer::OpenDemuxStream()
   CLog::Log(LOGINFO, "Creating Demuxer");
 
   int attempts = 10;
+  // An input that answers RETRY is waiting (a disc still, a BD-J application
+  // that has not picked its playlist yet), not failing: wait for it rather
+  // than spend the attempts, which a burst of instant retries used up in a
+  // few milliseconds - A Cure for Wellness ended its intro on an infinite
+  // still while its menu title started, every probe read nothing, and the
+  // play was abandoned (2026-10-06). Bounded, and a stop still ends it.
+  constexpr auto RETRY_WAIT_MAX = 30s;
+  const auto retryUntil = std::chrono::steady_clock::now() + RETRY_WAIT_MAX;
   while (!m_bStop && attempts-- > 0)
   {
     m_pDemuxer.reset(CDVDFactoryDemuxer::CreateDemuxer(m_pInputStream));
@@ -1076,10 +1084,21 @@ bool CVideoPlayer::OpenDemuxStream()
     {
       continue;
     }
-    else if(!m_pDemuxer && m_pInputStream->NextStream() != CDVDInputStream::NEXTSTREAM_NONE)
+    else if (!m_pDemuxer)
     {
-      CLog::Log(LOGDEBUG, "{} - New stream available from input, retry open", __FUNCTION__);
-      continue;
+      const CDVDInputStream::ENextStream next = m_pInputStream->NextStream();
+      if (next == CDVDInputStream::NEXTSTREAM_RETRY &&
+          std::chrono::steady_clock::now() < retryUntil)
+      {
+        attempts++;
+        CThread::Sleep(100ms);
+        continue;
+      }
+      if (next != CDVDInputStream::NEXTSTREAM_NONE)
+      {
+        CLog::Log(LOGDEBUG, "{} - New stream available from input, retry open", __FUNCTION__);
+        continue;
+      }
     }
     break;
   }
