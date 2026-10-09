@@ -262,6 +262,8 @@ public:
 #define TRICKMODE_FFFB  0x02
 
 static const uint64_t UINT64_0 = 0x8000000000000000ULL;
+// stream-mode running floor, in average access units (see m_auBytesAvg)
+static constexpr float FLOOR_ACCESS_UNITS = 16.0f;
 
 #define EXTERNAL_PTS    (1)
 #define SYNC_OUTSIDE    (2)
@@ -2091,6 +2093,7 @@ bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, bool isDualSt
   m_tp_last_frame = std::chrono::steady_clock::now();
   m_decoder_timeout = CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_videoDecoderTimeout;
   m_buffer_level_ready = false;
+  m_auBytesAvg = 0.0f;
   m_skipBufferFillGate = false;
   m_abort = false;
   m_starve_bypass = false;
@@ -3169,6 +3172,10 @@ bool CAMLCodec::AddData(uint8_t *pData, size_t iSize, double dts, double pts)
     return false;
   }
   m_wrFailActive = false;
+  if (iSize > 0)
+    m_auBytesAvg = (m_auBytesAvg <= 0.0f)
+                       ? static_cast<float>(iSize)
+                       : m_auBytesAvg + (static_cast<float>(iSize) - m_auBytesAvg) / 32.0f;
   if (iSize > 50000)
     usleep(2000); // wait 2ms to process larger packets
 
@@ -3479,8 +3486,20 @@ CDVDVideoCodec::VCReturn CAMLCodec::GetPicture(VideoPicture *pVideoPicture)
   // with EAGAIN and the EOF/stall handling below - including the parked
   // stall clock for the can't-decode still tail - proceeds exactly as
   // before.
+  //
+  // The running floor exists so the next access units are already in the
+  // buffer when a picture is dequeued (an EL picture only completes once the
+  // following access unit has arrived). As a share of the buffer it means
+  // seconds of a high-bitrate title but tens of seconds of a near-static one,
+  // so it is capped at FLOOR_ACCESS_UNITS average access units (m_auBytesAvg).
+  // A 40 Mbit/s title is unchanged (16 access units are over 10%); Spartacus'
+  // ~400 kbit/s overture sat on the 10% floor and presented ~3.4 fps for 4 min.
+  float minimum_level = m_minimum_buffer_level;
+  if (streambuffer && m_auBytesAvg > 0.0f && size > 0)
+    minimum_level = std::min(minimum_level,
+                             100.0f * FLOOR_ACCESS_UNITS * m_auBytesAvg / static_cast<float>(size));
   const bool level_gate_open =
-      (m_buffer_level_ready && buffer_level > m_minimum_buffer_level) || m_drain;
+      (m_buffer_level_ready && buffer_level > minimum_level) || m_drain;
 
   // A segment can decode a picture without ever crossing the fill threshold and
   // without draining - a short single-stream clip, a menu segment, or the tail
@@ -3587,7 +3606,7 @@ CDVDVideoCodec::VCReturn CAMLCodec::GetPicture(VideoPicture *pVideoPicture)
       CLog::Log(LOGDEBUG, LOGVIDEO,
                 "CAMLCodec::GetPicture: starve probe dequeued a picture below the fill gate "
                 "[sbuf:{} lvl:{:.1f}% min:{:.1f}% idle:{}ms since_frame:{}ms delay:{}ms]",
-                streambuffer, buffer_level, m_minimum_buffer_level, probe_idle.count(),
+                streambuffer, buffer_level, minimum_level, probe_idle.count(),
                 elapsed_since_last_frame.count(), static_cast<int>(starve_probe_delay.count()));
     }
 

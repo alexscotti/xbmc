@@ -166,6 +166,14 @@ private:
 
   bool            m_buffer_level_ready;
   float           m_minimum_buffer_level;
+  // Running average of the bytes in one access unit, from AddData. In stream
+  // mode the running floor is a share of the stream buffer (10% = 1.5 MB),
+  // which is ~7 access units of a 40 Mbit/s UHD title but ~30 s of a near-
+  // static one (an overture card, a black title, ~400 kbit/s) - more than the
+  // player ever reads ahead, so the gate opened only through the starve probe
+  // and the picture stalled 1-5 s at a time. The floor is capped at
+  // FLOOR_ACCESS_UNITS of these, so it stays a cushion of access units.
+  float           m_auBytesAvg = 0.0f;
   // stream-buffer data_len at the previous GetPicture call: the parked
   // stall clock only engages while this is UNCHANGED (idle input); a
   // changing value with no frames out is a consume-without-output wedge
