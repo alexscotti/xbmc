@@ -113,6 +113,15 @@ CRendererAML::GuiEncoding CRendererAML::ResolveGuiEncoding(const VideoPicture& p
 
 bool CRendererAML::ConfigChanged(const VideoPicture& picture)
 {
+  // Only a hardware-decoded picture can be presented here. A BD segment can
+  // swap the hardware decoder for a software one with every picture parameter
+  // the same - Pink Floyd: The Wall goes from a 1080p H.264 menu to its 1080p
+  // MPEG-2 film, which the S6 decodes in software - and IsSameParams cannot
+  // see that, so ask for the reconfigure that hands the segment to a renderer
+  // that can draw it (Create declines anything else).
+  if (picture.videoBuffer && !dynamic_cast<CAMLVideoBuffer*>(picture.videoBuffer))
+    return true;
+
   // A decoder swap can change the resolved DV output mode while every picture
   // parameter stays identical (BD menu-domain segments are force-mapped to DV,
   // feature titles are not). IsSameParams cannot see that, so ask for the
@@ -301,6 +310,13 @@ void CRendererAML::ReleaseBuffer(int idx)
         amli->m_amlCodec = nullptr; // Released
       }
       amli->Release();
+    }
+    else
+    {
+      // AddVideoPicture acquired it, whatever it is: an unreleased software
+      // frame never goes back to its pool (3 MB a 1080p frame, 24 a second -
+      // The Wall's film took Kodi to the OOM killer in 40 s)
+      buf.videoBuffer->Release();
     }
     buf.videoBuffer = nullptr;
   }
