@@ -128,6 +128,7 @@ public:
   bool IsCaching() const;
   bool IsInMenu() const;
   bool IsInDiscMenu() const;
+  std::string GetDiscMenuSignals() const;
   bool IsPaused() const;
   bool IsPausedPlayback() const;
   bool IsPassthrough() const;

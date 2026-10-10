@@ -424,6 +424,14 @@ public:
    * next segment is read, at most one queue depth before the picture. */
   bool IsInDiscMenu() const { return m_navmode && m_menu && !m_popupAvailable; }
 
+  /* raw inputs for VideoPlayer.DiscMenuSignals (VideoPlayer::UpdatePlayState):
+   * whether the title is BD-J, and the playlist being read */
+  bool IsBdjTitlePlaying() const { return IsBdjTitle(); }
+  int GetCurrentPlaylist() const
+  {
+    return m_playlist <= MAX_PLAYLIST_ID ? static_cast<int>(m_playlist) : -1;
+  }
+
   /* presentation-side playlist identity (see BlurayTitleUiSnapshot): applied
    * by the player's timeline queue when the render clock reaches the demux
    * position of the playlist change. Read by the IChapter/IDisplayTime UI

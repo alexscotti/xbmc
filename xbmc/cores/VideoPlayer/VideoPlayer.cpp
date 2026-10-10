@@ -6997,6 +6997,12 @@ bool CVideoPlayer::IsInMenu() const
   return m_State.isInMenu;
 }
 
+std::string CVideoPlayer::GetDiscMenuSignals() const
+{
+  std::unique_lock lock(m_StateSection);
+  return m_State.discMenuSignals;
+}
+
 bool CVideoPlayer::IsInDiscMenu() const
 {
   std::unique_lock lock(m_StateSection);
@@ -7418,6 +7424,7 @@ void CVideoPlayer::UpdatePlayState(double timeout)
   state.cantempo = false;
   state.isInMenu = false;
   state.isInDiscMenu = false;
+  state.discMenuSignals.clear();
   state.menuType = MenuType::NONE;
 
   if (m_pInputStream)
@@ -7538,7 +7545,18 @@ void CVideoPlayer::UpdatePlayState(double timeout)
       // Measured with dvtest/menucheck.py on 15 discs.
 #if defined(HAVE_LIBBLURAY)
       if (m_pInputBluray && m_pInputBluray->IsNavigationMode())
+      {
         state.isInDiscMenu = IsInMenuInternal() && !pMenu->CanSeek();
+        // The raw inputs, for a caller that tracks the session over time
+        // (player.coreelec's in_bdmv_menu): the disc's menu graphics, whether
+        // it allows seeking, BD-J or HDMV, the playlist, and a still. None of
+        // them alone says "menu" - the BD-J graphics flag stays up through
+        // A.I.'s film, and UHF's IG menu sits on a loop that allows seeking.
+        state.discMenuSignals = StringUtils::Format(
+            "graphics={};seek={};bdj={};playlist={};still={}", pMenu->IsInMenu() ? 1 : 0,
+            pMenu->CanSeek() ? 1 : 0, m_pInputBluray->IsBdjTitlePlaying() ? 1 : 0,
+            m_pInputBluray->GetCurrentPlaylist(), m_dvd.state == DVDSTATE_STILL ? 1 : 0);
+      }
       else
 #endif
         state.isInDiscMenu = state.isInMenu;

@@ -207,6 +207,12 @@ public:
   virtual bool IsInDiscMenu() const { return false; }
 
   /*!
+   * \brief Raw disc-menu inputs as "graphics=;seek=;bdj=;playlist=;still=",
+   * or "" when the player has none (VideoPlayer.DiscMenuSignals).
+   */
+  virtual std::string GetDiscMenuSignals() const { return ""; }
+
+  /*!
    * \brief Get the supported menu type
    * \return The supported menu type
   */

@@ -51,6 +51,7 @@ struct SPlayerState
     player_state  = "";
     isInMenu = false;
     isInDiscMenu = false;
+    discMenuSignals.clear();
     menuType = MenuType::NONE;
     chapter = 0;
     chapters.clear();
@@ -81,6 +82,7 @@ struct SPlayerState
   std::string player_state; // full player state
   bool isInMenu;
   bool isInDiscMenu;        // the disc's navigation is what plays (IsInDiscMenu)
+  std::string discMenuSignals; // raw menu inputs (GetDiscMenuSignals)
   MenuType menuType;
   bool streamsReady;
 
@@ -309,6 +311,7 @@ public:
   float GetAVDelay() override;
   bool IsInMenu() const override;
   bool IsInDiscMenu() const override;
+  std::string GetDiscMenuSignals() const override;
 
   /*!
    * \brief Get the supported menu type

@@ -4430,6 +4430,7 @@ constexpr std::array<InfoMap, 90> videoplayer = {{
     {"hasvideoversions",      VIDEOPLAYER_HAS_VIDEOVERSIONS},
     {"indiscmenu",            VIDEOPLAYER_IN_DISC_MENU},
     {"discmenustate",         VIDEOPLAYER_DISC_MENU_STATE},
+    {"discmenusignals",       VIDEOPLAYER_DISC_MENU_SIGNALS},
     {"episodepart",           VIDEOPLAYER_EPISODEPART},
     {"mediaproviders",        VIDEOPLAYER_MEDIAPROVIDERS},
     {"titleextrainfo",        VIDEOPLAYER_TITLE_EXTRAINFO},
