@@ -3245,8 +3245,15 @@ void CVideoPlayer::HandlePlaySpeed()
     bool video = (m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_WAITSYNC) ||
                  (m_CurrentVideo.packets == 0 && m_CurrentAudio.packets > threshold) ||
                  (!m_VideoPlayerAudio->AcceptsData() && m_processInfo->GetLevelVQ() < 10);
+    // A disc still delivers its picture and no audio at all, so the audio
+    // stream's "no packets while video has threshold" exception can never come
+    // true: Digital Video Essentials' first menu is an infinite still (STILL_TIME
+    // 0, one MPEG-2 picture, pts 11.651) and the clock stayed at 0.343 for good,
+    // the picture queued and never shown. In a still, audio with nothing to say
+    // is ready; the clock then starts from the video.
     bool audio = m_CurrentAudio.id < 0 || (m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_WAITSYNC) ||
                  (m_CurrentAudio.packets == 0 && m_CurrentVideo.packets > threshold) ||
+                 (m_CurrentAudio.packets == 0 && m_dvd.state == DVDSTATE_STILL) ||
                  (!m_VideoPlayerVideo->AcceptsData() && m_VideoPlayerAudio->GetLevel() < 10);
 
     const bool syncAudio = m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_WAITSYNC &&
