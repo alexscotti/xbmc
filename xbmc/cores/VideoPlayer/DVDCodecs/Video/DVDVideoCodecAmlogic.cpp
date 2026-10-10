@@ -925,6 +925,22 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
         const double pairDts =
             packet.demuxDts != DVD_NOPTS_VALUE ? packet.demuxDts : packet.dts;
 
+        // Which clip each layer is on: a layer whose demuxer dts jumps by over
+        // a second (CheckContinuity's restart threshold) has moved to a new
+        // clip; once the other layer has too, both are on it.
+        const int layer = packet.isELPackage ? 1 : 0;
+        if (pairDts != DVD_NOPTS_VALUE)
+        {
+          if (m_layerLastDemuxDts[layer] != DVD_NOPTS_VALUE &&
+              fabs(pairDts - m_layerLastDemuxDts[layer]) > DVD_MSEC_TO_TIME(1000))
+          {
+            m_layerOnNewClip[layer] = true;
+            if (m_layerOnNewClip[1 - layer])
+              m_layerOnNewClip[0] = m_layerOnNewClip[1] = false;
+          }
+          m_layerLastDemuxDts[layer] = pairDts;
+        }
+
         while (!dual_layer_converted && !m_packages.empty())
         {
           // convert bl and el package to single package
@@ -941,6 +957,23 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
 
           const bool dtsKnown =
               demuxDtsBackup != DVD_NOPTS_VALUE && pairDts != DVD_NOPTS_VALUE;
+          // The mirror of the stale-queue eviction below: seconds BEHIND the
+          // incoming packet, on a layer that has already moved to a new clip
+          // while the incoming packet's layer has not, the queue is the new
+          // clip and the incoming packet is the one that ended. The Abyss
+          // (00800.mpls) joins a 16.6s intro to the film: the film clip's
+          // first BLs (demux dts 11.609 on) were queued when the intro's last
+          // EL (28.209) arrived, and every one of them - the clip's IDR
+          // included - was dropped as unpaired; the decoder then had no IRAP
+          // until the next I picture and video froze 6.2s, every play.
+          if (dtsKnown && demuxDtsBackup < pairDts - DL_STALE_QUEUE_LEAD &&
+              m_layerOnNewClip[isELPackageBackup ? 1 : 0] && !m_layerOnNewClip[layer])
+          {
+            CLog::Log(LOGDEBUG, LOGVIDEO, "CDVDVideoCodecAmlogic::{}: dropping incoming {} package with demux dts: {:.3f} ({:.3f}s ahead of queued {} on the new clip - previous clip)", __FUNCTION__,
+              packet.isELPackage ? "EL" : "BL", pairDts/DVD_TIME_BASE,
+              (pairDts - demuxDtsBackup)/DVD_TIME_BASE, isELPackageBackup ? "EL" : "BL");
+            return true;
+          }
           if (dtsKnown && demuxDtsBackup < pairDts - DL_PAIR_DTS_TOLERANCE)
           {
             CLog::Log(LOGDEBUG, LOGVIDEO, "CDVDVideoCodecAmlogic::{}: dropping unpaired {} package with demux dts: {:.3f} (incoming {} demux dts: {:.3f})", __FUNCTION__,
@@ -1362,6 +1395,8 @@ void CDVDVideoCodecAmlogic::Reset(void)
   m_pendingTimelineRestart = false;
   m_lastFedDemuxDts = DVD_NOPTS_VALUE;
   m_irapSinceClipStart = false;
+  m_layerLastDemuxDts[0] = m_layerLastDemuxDts[1] = DVD_NOPTS_VALUE;
+  m_layerOnNewClip[0] = m_layerOnNewClip[1] = false;
 
   while (!m_packages.empty())
   {
@@ -1432,6 +1467,8 @@ void CDVDVideoCodecAmlogic::Reopen(void)
   m_pendingTimelineRestart = false;
   m_lastFedDemuxDts = DVD_NOPTS_VALUE;
   m_irapSinceClipStart = false;
+  m_layerLastDemuxDts[0] = m_layerLastDemuxDts[1] = DVD_NOPTS_VALUE;
+  m_layerOnNewClip[0] = m_layerOnNewClip[1] = false;
 
   while (!m_packages.empty())
   {

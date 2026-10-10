@@ -187,6 +187,11 @@ private:
   // timeline-restart reset is gated on (see AddData).
   double m_lastFedDemuxDts = DVD_NOPTS_VALUE;
   bool m_irapSinceClipStart = false;
+  // Per layer (0 BL, 1 EL): the last demuxer dts that arrived, and whether the
+  // layer has jumped by over a second to a new clip that the other layer has
+  // not reached yet - which side of a clip change a pairing straggler is on.
+  double m_layerLastDemuxDts[2] = {DVD_NOPTS_VALUE, DVD_NOPTS_VALUE};
+  bool m_layerOnNewClip[2] = {false, false};
   bool m_felIdrPaddingPushed = false;
   // Free the head of m_packages, keeping m_packagesBytes in step.
   void PopPackageFront();
