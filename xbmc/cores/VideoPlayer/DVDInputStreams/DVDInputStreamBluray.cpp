@@ -1673,8 +1673,10 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
   m_dispTimeBeforeRead = static_cast<int>((bd_tell_time(m_bd) / 90));
   if(m_navmode)
   {
-    ReleaseExpiredStill();
     do {
+      // inside the loop: a timed still's end-of-title reads come back here
+      // without ever leaving Read()
+      ReleaseExpiredStill();
 
       if (m_hold == HOLD_HELD)
          return 0;
