@@ -56,6 +56,26 @@ constexpr double DL_PAIR_DTS_TOLERANCE = 10000.0;
 // 00801.mpls). Comfortably above any real skew, far below any real restart.
 constexpr double DL_STALE_QUEUE_LEAD = 2.0 * DVD_TIME_BASE;
 
+// The presentation time of a BL+EL pair. Both layers of a frame carry one dts
+// and one pts, but a disc can get the BL's pts wrong: Donnie Darko's BL PES
+// give every B-frame of a mini-GOP its P-frame's pts (221980312 three times
+// running, 20 GB into 00004.m2ts) while the EL's carry the true B-pyramid
+// order. Checked in to the decoder, the BL's labels pictures out of order and
+// presentation judders at half rate. So when the layers disagree, the frame's
+// pts-dts distance comes from the EL and is laid on the BL's dts - the BL's,
+// because only the BL went through the player's continuity correction - as
+// long as it is a plausible reorder delay (0 to 1 s).
+double DualLayerPts(double blDts, double blPts, double elDts, double elPts)
+{
+  if (blDts == DVD_NOPTS_VALUE || blPts == DVD_NOPTS_VALUE || elDts == DVD_NOPTS_VALUE ||
+      elPts == DVD_NOPTS_VALUE)
+    return blPts;
+  const double elDelay = elPts - elDts;
+  if (elDelay == blPts - blDts || elDelay < 0 || elDelay > DVD_TIME_BASE)
+    return blPts;
+  return blDts + elDelay;
+}
+
 // Display's DV VSVDB target max luminance in nits, for the Smart CMv4.0
 // bypass default. Delegates to AMLUtils' injection-aware parser (the local
 // duplicate read dv_cap directly, which reports the INJECTED block while a
@@ -963,7 +983,7 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
             {
               // incoming packet is the BL
               mergedDts = packet.dts;
-              mergedPts = packet.pts;
+              mergedPts = DualLayerPts(packet.dts, packet.pts, dtsBackup, ptsBackup);
               m_pendingMeta = m_streamMeta;
               AMLLatchHevcDoviRpu(pDataBackup, iSizeBackup, m_nalLengthSize, m_pendingMeta);
               AMLLatchHevcSei(pData, iSize, m_nalLengthSize, m_pendingMeta);
@@ -978,7 +998,7 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
             {
               // queued packet is the BL
               mergedDts = dtsBackup;
-              mergedPts = ptsBackup;
+              mergedPts = DualLayerPts(dtsBackup, ptsBackup, packet.dts, packet.pts);
               m_pendingMeta = m_streamMeta;
               AMLLatchHevcDoviRpu(packet.pData, packet.iSize, m_nalLengthSize, m_pendingMeta);
               AMLLatchHevcSei(pDataBackup, iSizeBackup, m_nalLengthSize, m_pendingMeta);
