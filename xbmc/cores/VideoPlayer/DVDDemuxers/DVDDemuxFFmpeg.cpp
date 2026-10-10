@@ -2958,6 +2958,24 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream(int streamIdx)
         delete stream;
         return nullptr;
       }
+      // An INTERACTIVE GRAPHICS stream (PID 0x1400-0x141f) is the disc's menu,
+      // which libbluray decodes and draws itself - never a stream for Kodi.
+      // ffmpeg has no codec for its stream type and probes the PES payload,
+      // which can pass for MPEG audio: Basic Instinct's language select (a 60 s
+      // HEVC loop with no audio track) turned up with an "mp3" audio stream,
+      // the player waited for audio that never came, the clock never started,
+      // and the IG menu - presented by that clock - never appeared or took a
+      // key.
+      if (pStream->id >= HDMV_PID_IG_FIRST && pStream->id <= HDMV_PID_IG_LAST)
+      {
+        CLog::Log(LOGDEBUG,
+                  "CDVDDemuxFFmpeg::AddStream - discarding bluray interactive graphics "
+                  "stream, pid {:#06x} ({})",
+                  pStream->id, stream->codecName);
+        pStream->discard = AVDISCARD_ALL;
+        delete stream;
+        return nullptr;
+      }
 
       stream->dvdNavId = pStream->id;
 
