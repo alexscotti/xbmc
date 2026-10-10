@@ -1032,6 +1032,12 @@ void CDVDInputStreamBluray::ProcessEvent() {
     m_player->OnDiscNavResult(static_cast<void*>(&pid), BD_EVENT_STILL_TIME);
     m_hold = HOLD_STILL;
     m_stillTimePending = true;
+    // 0 is an infinite still; anything else ends on its own
+    if (m_event.param > 0)
+      m_stillDeadline = std::chrono::steady_clock::now() +
+                        std::chrono::seconds(m_event.param) + std::chrono::seconds(1);
+    else
+      m_stillDeadline.reset();
     break;
 
   case BD_EVENT_STILL:
@@ -1114,6 +1120,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
 
   case BD_EVENT_TITLE:
     m_stillTimePending = false;  // a new title: no still left to release
+    m_stillDeadline.reset();
     // A jump breaks the sequential run the ISO read-ahead is keyed on.
     ResetIsoCacheAccessPattern();
   {
@@ -1141,6 +1148,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
   }
   case BD_EVENT_PLAYLIST:
     m_stillTimePending = false;  // a new playlist: no still left to release
+    m_stillDeadline.reset();
     // the background plane lies behind video: once a playlist plays, it is covered
     SetBackgroundVisible(false);
     // a playlist brings the DV engage back (VideoPlayer::OpenStream), and with
@@ -1665,6 +1673,7 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
   m_dispTimeBeforeRead = static_cast<int>((bd_tell_time(m_bd) / 90));
   if(m_navmode)
   {
+    ReleaseExpiredStill();
     do {
 
       if (m_hold == HOLD_HELD)
@@ -2841,6 +2850,8 @@ CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
   if(!m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR)
     return NEXTSTREAM_NONE;
 
+  ReleaseExpiredStill();
+
   // The read came back empty only to let the player run while the BD-J
   // application waits for the picture (see WaitForBdjPresentation): no
   // boundary, nothing to open - read again after the player's loop.
@@ -3152,6 +3163,26 @@ bool CDVDInputStreamBluray::IsMenuDomainVideo()
   return domain;
 }
 
+// A timed still whose time is up, released from the read path. The player's
+// own timer normally does it (SkipStill), but that timer lives in the player's
+// still state, which a segment transition run right after BD_EVENT_STILL_TIME
+// resets: James Bond The World Is Not Enough's 7s FBI-warning still (playlist
+// 8) was then never released and libbluray reported END_OF_TITLE 0 forever.
+// The deadline carries a second's margin, so the player's timer still wins
+// whenever it runs.
+void CDVDInputStreamBluray::ReleaseExpiredStill()
+{
+  if (!m_stillDeadline || std::chrono::steady_clock::now() < *m_stillDeadline)
+    return;
+  CLog::Log(LOGINFO, "CDVDInputStreamBluray - timed still's time is up and the player did not "
+                     "release it: releasing it");
+  m_stillDeadline.reset();
+  m_stillTimePending = false;
+  if (m_hold == HOLD_STILL)
+    m_hold = HOLD_HELD;
+  bd_read_skip_still(m_bd);
+}
+
 void CDVDInputStreamBluray::SkipStill()
 {
   if(m_bd == nullptr || !m_navmode)
@@ -3169,6 +3200,7 @@ void CDVDInputStreamBluray::SkipStill()
     if (m_hold == HOLD_STILL)
       m_hold = HOLD_HELD;
     m_stillTimePending = false;
+    m_stillDeadline.reset();
     bd_read_skip_still(m_bd);
 
     /* process all queued up events */

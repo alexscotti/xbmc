@@ -754,6 +754,11 @@ protected:
   // A timed still (BD_EVENT_STILL_TIME) that libbluray is holding until
   // bd_read_skip_still(); see SkipStill.
   bool m_stillTimePending = false;
+  // When a timed still is due to end (STILL_TIME + a margin over the player's
+  // own timer); ReleaseExpiredStill releases it from the read path if the
+  // player's timer never did.
+  std::optional<std::chrono::steady_clock::time_point> m_stillDeadline;
+  void ReleaseExpiredStill();
   BD_EVENT m_event;
 #ifdef HAVE_LIBBLURAY_BDJ
   struct bd_argb_buffer_s m_argb;
