@@ -182,6 +182,11 @@ private:
   bool m_pendingTimelineRestart = false;
   uint32_t m_lastTimelineRestartSeq = 0;
   bool m_timelineRestartSeqSeeded = false;
+  // The demuxer dts of the last access unit fed, and whether an IRAP has been
+  // fed since that dts last jumped back by over a second (a new clip): what the
+  // timeline-restart reset is gated on (see AddData).
+  double m_lastFedDemuxDts = DVD_NOPTS_VALUE;
+  bool m_irapSinceClipStart = false;
   bool m_felIdrPaddingPushed = false;
   // Free the head of m_packages, keeping m_packagesBytes in step.
   void PopPackageFront();

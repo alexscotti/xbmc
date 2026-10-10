@@ -1220,12 +1220,35 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
   //
   // "Unknown" is not "no IRAP": only the dual-layer conversion classifies the
   // access unit, so an unclassified one must not trigger a reset.
+  //
+  // And the question is whether the incoming CLIP started on an IRAP, not
+  // whether the access unit in hand is one: the restart stamp can ride a later
+  // packet than the clip's first. The Abyss's film playlist joins a 16.6s intro
+  // to the film clip (cc=5) on an IDR_W_RADL, yet the reset ran after that IDR
+  // had been fed (the decoder's first picture afterwards was POC 42, a later I
+  // picture) - so the IDR was thrown away: 4 errors per layer and a 6.2s
+  // freeze, every play. So remember whether any access unit fed since the demuxer's dts last
+  // jumped back by over a second (CheckContinuity's own restart threshold)
+  // carried an IRAP, and reset only when none has.
+  bool irapKnown = false;
+  const bool lastAuIsIrap = m_bitstream ? m_bitstream->GetLastAuIsIrap(irapKnown) : false;
+  if (pData)
+  {
+    const double feedDts = packet.demuxDts != DVD_NOPTS_VALUE ? packet.demuxDts : packet.dts;
+    if (feedDts != DVD_NOPTS_VALUE)
+    {
+      if (m_lastFedDemuxDts != DVD_NOPTS_VALUE &&
+          feedDts < m_lastFedDemuxDts - DVD_MSEC_TO_TIME(1000))
+        m_irapSinceClipStart = false;
+      m_lastFedDemuxDts = feedDts;
+    }
+    if (irapKnown && lastAuIsIrap)
+      m_irapSinceClipStart = true;
+  }
   if (m_pendingTimelineRestart && pData)
   {
     m_pendingTimelineRestart = false;
-    bool irapKnown = false;
-    const bool sawIrap = m_bitstream ? m_bitstream->GetLastAuIsIrap(irapKnown) : false;
-    if (m_bitstream && m_bitstream->GetDoviIsFEL() && irapKnown && !sawIrap)
+    if (m_bitstream && m_bitstream->GetDoviIsFEL() && irapKnown && !m_irapSinceClipStart)
     {
       CLog::Log(LOGINFO,
                 "{}::{} - timeline restart - incoming clip's first access unit carries no IRAP; "
@@ -1337,6 +1360,8 @@ void CDVDVideoCodecAmlogic::Reset(void)
   m_Codec->Reset();
 
   m_pendingTimelineRestart = false;
+  m_lastFedDemuxDts = DVD_NOPTS_VALUE;
+  m_irapSinceClipStart = false;
 
   while (!m_packages.empty())
   {
@@ -1405,6 +1430,8 @@ void CDVDVideoCodecAmlogic::Reopen(void)
     m_Codec->CloseDecoder();
   m_opened = false;
   m_pendingTimelineRestart = false;
+  m_lastFedDemuxDts = DVD_NOPTS_VALUE;
+  m_irapSinceClipStart = false;
 
   while (!m_packages.empty())
   {
