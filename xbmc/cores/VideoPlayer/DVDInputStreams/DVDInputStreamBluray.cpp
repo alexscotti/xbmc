@@ -1031,6 +1031,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
     pid = m_event.param;
     m_player->OnDiscNavResult(static_cast<void*>(&pid), BD_EVENT_STILL_TIME);
     m_hold = HOLD_STILL;
+    m_stillTimePending = true;
     break;
 
   case BD_EVENT_STILL:
@@ -1112,6 +1113,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
     break;
 
   case BD_EVENT_TITLE:
+    m_stillTimePending = false;  // a new title: no still left to release
     // A jump breaks the sequential run the ISO read-ahead is keyed on.
     ResetIsoCacheAccessPattern();
   {
@@ -1138,6 +1140,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
     break;
   }
   case BD_EVENT_PLAYLIST:
+    m_stillTimePending = false;  // a new playlist: no still left to release
     // the background plane lies behind video: once a playlist plays, it is covered
     SetBackgroundVisible(false);
     // a playlist brings the DV engage back (VideoPlayer::OpenStream), and with
@@ -3154,9 +3157,18 @@ void CDVDInputStreamBluray::SkipStill()
   if(m_bd == nullptr || !m_navmode)
     return;
 
-  if ( m_hold == HOLD_STILL)
+  // The still is libbluray's until bd_read_skip_still(), whatever m_hold has
+  // become since: a read that returns data with the event, or the segment
+  // transition the player runs right after it, replaces HOLD_STILL. James Bond
+  // The World Is Not Enough plays a 7s FBI-warning still (playlist 8,
+  // STILL_TIME 7) after "Initiate Mission": the player's timer fired, m_hold
+  // was no longer HOLD_STILL, the skip never reached libbluray, and the disc
+  // sat on the warning for good (END_OF_TITLE 0 forever).
+  if (m_hold == HOLD_STILL || m_stillTimePending)
   {
-    m_hold = HOLD_HELD;
+    if (m_hold == HOLD_STILL)
+      m_hold = HOLD_HELD;
+    m_stillTimePending = false;
     bd_read_skip_still(m_bd);
 
     /* process all queued up events */

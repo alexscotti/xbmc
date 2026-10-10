@@ -751,6 +751,9 @@ protected:
     HOLD_ERROR,
     HOLD_EXIT
   } m_hold = HOLD_NONE;
+  // A timed still (BD_EVENT_STILL_TIME) that libbluray is holding until
+  // bd_read_skip_still(); see SkipStill.
+  bool m_stillTimePending = false;
   BD_EVENT m_event;
 #ifdef HAVE_LIBBLURAY_BDJ
   struct bd_argb_buffer_s m_argb;
