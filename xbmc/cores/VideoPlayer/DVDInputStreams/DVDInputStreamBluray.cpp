@@ -1780,6 +1780,26 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
           }
           return 0;
         }
+        // An open that has had no data, at the end of a BD-J title whose
+        // notifications are held for the picture: a deadlock. The player only
+        // opens a demuxer once the previous segment has drained, so the
+        // picture HAS reached the end of what was read - but the clock that
+        // would release the hold cannot run while the player thread waits in
+        // this open, and the data the open waits for only comes once the
+        // application hears "end of playlist" and starts its next playlist.
+        // James Bond The World Is Not Enough: "Initiate Mission" plays a 7s
+        // FBI-warning still (playlist 8); the application waited for its end
+        // forever while Read() spun on END_OF_TITLE. Release what is held.
+#if defined(BD_BDJ_PRESENTATION_TIMING)
+        if (m_demuxerOpening && m_demuxerOpenBytes == 0 && m_bdjEndOfTitleRead &&
+            IsBdjTitle() && BdjTimingActive() && bd_bdj_pending_seq(m_bd) != 0)
+        {
+          CLog::Log(LOGINFO, "CDVDInputStreamBluray - demuxer open waiting on a BD-J title "
+                             "whose end-of-playlist notifications are held: releasing them");
+          ReleaseAllBdjEvents();
+          m_bdjAtPlaylistEnd = true;
+        }
+#endif
         // Still held for the picture: back to the player loop (NextStream
         // answers RETRY). Not while the demuxer opens - an open handed no
         // data fails its format probe (see above); it waits here as before.
