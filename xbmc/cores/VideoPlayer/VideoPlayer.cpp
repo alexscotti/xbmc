@@ -7553,9 +7553,10 @@ void CVideoPlayer::UpdatePlayState(double timeout)
         // them alone says "menu" - the BD-J graphics flag stays up through
         // A.I.'s film, and UHF's IG menu sits on a loop that allows seeking.
         state.discMenuSignals = StringUtils::Format(
-            "graphics={};seek={};bdj={};playlist={};still={}", pMenu->IsInMenu() ? 1 : 0,
+            "graphics={};seek={};bdj={};popup={};playlist={};still={}", pMenu->IsInMenu() ? 1 : 0,
             pMenu->CanSeek() ? 1 : 0, m_pInputBluray->IsBdjTitlePlaying() ? 1 : 0,
-            m_pInputBluray->GetCurrentPlaylist(), m_dvd.state == DVDSTATE_STILL ? 1 : 0);
+            m_pInputBluray->IsPopupMenuModel() ? 1 : 0, m_pInputBluray->GetCurrentPlaylist(),
+            m_dvd.state == DVDSTATE_STILL ? 1 : 0);
       }
       else
 #endif

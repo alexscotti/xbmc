@@ -719,7 +719,7 @@ bool CVideoGUIInfo::GetLabel(std::string& value,
       return true;
     case VIDEOPLAYER_DISC_MENU_SIGNALS:
       // raw inputs behind DiscMenuState for a caller that tracks a session:
-      // "graphics=;seek=;bdj=;playlist=;still=" on a Blu-ray in navigation
+      // "graphics=;seek=;bdj=;popup=;playlist=;still=" on a Blu-ray in navigation
       // mode, "" otherwise
       value = m_appPlayer->GetDiscMenuSignals();
       return true;

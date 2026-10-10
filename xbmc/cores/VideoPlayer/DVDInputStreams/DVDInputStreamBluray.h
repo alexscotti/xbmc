@@ -427,6 +427,8 @@ public:
   /* raw inputs for VideoPlayer.DiscMenuSignals (VideoPlayer::UpdatePlayState):
    * whether the title is BD-J, and the playlist being read */
   bool IsBdjTitlePlaying() const { return IsBdjTitle(); }
+  // an HDMV pop-up menu model (BD_EVENT_POPUP): graphics over the content
+  bool IsPopupMenuModel() const { return m_popupAvailable; }
   int GetCurrentPlaylist() const
   {
     return m_playlist <= MAX_PLAYLIST_ID ? static_cast<int>(m_playlist) : -1;
