@@ -6103,6 +6103,23 @@ bool CVideoPlayer::OpenVideoStream(CDVDStreamInfo& hint, bool reset)
     CDVDStreamInfo cmp(hint);
     if (!stillsSelectsDecMode)
       cmp.stills = m_CurrentVideo.hint.stills;
+    // An HD clip that leaves its colour description out means the BT.709
+    // defaults it would otherwise state: Nostalghia's film says nothing, its
+    // 1 s tail says BT.709/limited, and the mismatch reopened the decoder at
+    // the join - a 2.3 s freeze. Only that pair, field by field, is the same.
+    const auto sameOrDefault = [](auto& field, auto current, auto unspecified, auto hd)
+    {
+      if ((field == unspecified && current == hd) || (field == hd && current == unspecified))
+        field = current;
+    };
+    sameOrDefault(cmp.colorSpace, m_CurrentVideo.hint.colorSpace, AVCOL_SPC_UNSPECIFIED,
+                  AVCOL_SPC_BT709);
+    sameOrDefault(cmp.colorRange, m_CurrentVideo.hint.colorRange, AVCOL_RANGE_UNSPECIFIED,
+                  AVCOL_RANGE_MPEG);
+    sameOrDefault(cmp.colorPrimaries, m_CurrentVideo.hint.colorPrimaries, AVCOL_PRI_UNSPECIFIED,
+                  AVCOL_PRI_BT709);
+    sameOrDefault(cmp.colorTransferCharacteristic, m_CurrentVideo.hint.colorTransferCharacteristic,
+                  AVCOL_TRC_UNSPECIFIED, AVCOL_TRC_BT709);
     int compare = CDVDStreamInfo::COMPARE_ALL & ~CDVDStreamInfo::COMPARE_ID;
     if (m_bdStreamReuseVideoInband)
       compare &= ~CDVDStreamInfo::COMPARE_EXTRADATA;
