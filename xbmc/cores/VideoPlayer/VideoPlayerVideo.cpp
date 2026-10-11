@@ -557,11 +557,24 @@ void CVideoPlayerVideo::Process()
     }
     else if (pMsg->IsType(CDVDMsg::VIDEO_DRAIN))
     {
-      while (!m_bStop && m_pVideoCodec)
+      // Drain until the decoder reports end of stream. A hardware decoder
+      // answers VC_BUFFER while it still finishes pictures; leaving on the
+      // first one handed the rest to the empty-queue wait (ten frame periods,
+      // nothing else arrives while the player renders audio out), so a
+      // segment's last ~2 s came out in bursts of 9 every ~420 ms - more
+      // than the render queue covers: late frames dropped, gaps of 209-459 ms
+      // growing to the end (Memento's title end, kernel presentation trace).
+      // Bounded: a decoder that never reports EOF costs 3 s here, no more.
+      const auto drainEnd = std::chrono::steady_clock::now() + 3s;
+      while (!m_bStop && m_pVideoCodec && !m_messageQueue.ReceivedAbortRequest())
       {
         m_pVideoCodec->SetCodecControl(DVD_CODEC_CTRL_DRAIN);
-        if (!ProcessDecoderOutput(frametime, pts))
+        if (ProcessDecoderOutput(frametime, pts))
+          continue;
+        if (m_lastDecoderState != CDVDVideoCodec::VC_BUFFER ||
+            std::chrono::steady_clock::now() > drainEnd)
           break;
+        CThread::Sleep(10ms);
       }
     }
     else if (pMsg->IsType(CDVDMsg::GENERAL_PAUSE))
@@ -690,6 +703,7 @@ void CVideoPlayerVideo::UpdatePlayerInfo()
 bool CVideoPlayerVideo::ProcessDecoderOutput(double &frametime, double &pts)
 {
   CDVDVideoCodec::VCReturn decoderState = m_pVideoCodec->GetPicture(&m_picture);
+  m_lastDecoderState = decoderState;
 
   if (decoderState == CDVDVideoCodec::VC_BUFFER)
   {

@@ -134,6 +134,9 @@ protected:
   float m_fForcedAspectRatio;
   int m_speed;
   std::atomic_bool m_stalled = false;
+  // what the decoder answered at the last ProcessDecoderOutput (VIDEO_DRAIN
+  // tells "still finishing" from "done" by it)
+  CDVDVideoCodec::VCReturn m_lastDecoderState = CDVDVideoCodec::VC_NONE;
   std::atomic_bool m_rewindStalled;
   bool m_paused;
   /* diagnostics only: last keep-alive stamp already reported as expired, so

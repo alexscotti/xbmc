@@ -1962,6 +1962,16 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
   if (!drain)
     ApplyDiscTimelineEvents(true);
 #endif
+  // Audio renders out first, with the player thread blocked on it for up to
+  // the queue depth (15 s at Memento's title end), so nothing reaches the
+  // video queue meanwhile: it runs dry while the decoder still holds the
+  // segment's last pictures, and with its input stopped the hardware decoder's
+  // fill gate releases them only through the starve probe - the segment ended
+  // in gaps of 209-459 ms over ~2 s (kernel presentation trace). Queue the
+  // video drain behind the last packet now, so those pictures present at their
+  // own times; CloseStream(video) below queues another and waits as before.
+  if (drain && m_CurrentVideo.id >= 0)
+    m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN), 0);
   CloseStream(m_CurrentAudio, drain);
   CloseStream(m_CurrentVideo, drain);
 
