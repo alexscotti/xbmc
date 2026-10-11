@@ -214,6 +214,10 @@ protected:
   bool m_checkTransportStream;
   int m_displayTime = 0;
   double m_dtsAtDisplayTime;
+  // Blu-ray display time (see Read): anchor the first packet on the title time
+  // the open started from, and re-anchor only on a timeline break
+  bool m_dispAnchorFromOpen = false;
+  double m_lastDispDts;
   bool m_seekToKeyFrame = false;
   double m_startTime = 0;
   std::vector<ChapterFFmpeg> m_chapters;

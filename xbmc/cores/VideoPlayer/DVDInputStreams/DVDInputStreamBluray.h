@@ -337,7 +337,16 @@ public:
   {
     m_demuxerOpening = opening;
     m_demuxerOpenBytes = 0;
+    if (opening)
+      m_demuxerOpenTime = -1;
   }
+  /* Title time (ms) of the read position when the demuxer now opening read
+   * its first bytes - where its segment starts. GetTime() is the position of
+   * the LAST read, which after the open's stream-info probe leads the packets
+   * the demuxer hands out by everything the probe buffered (Nosferatu's film:
+   * ~20 s), so a display time anchored on it runs that far ahead. -1 until
+   * the first read. */
+  int GetDemuxerOpenTime() const { return m_demuxerOpenTime; }
 
   /* The player took the SEAMLESS path at a held boundary: nothing was rebuilt.
    * Until the next segment's first byte arrives (m_hold == HOLD_DATA), Read()
@@ -592,6 +601,7 @@ protected:
   bool m_bdjEndOfTitleRead = false;
   bool m_demuxerOpening = false;
   uint64_t m_demuxerOpenBytes = 0; // bytes read since the open began
+  int m_demuxerOpenTime = -1; // see GetDemuxerOpenTime
   // length of the playlist that just ended, kept past FreeTitleInfo (ms)
   uint64_t m_endedTitleDurationMs = 0;
   // A BD-J playlist read whole while the demuxer was opening has presented

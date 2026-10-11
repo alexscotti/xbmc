@@ -231,6 +231,7 @@ CDVDDemuxFFmpeg::CDVDDemuxFFmpeg() : CDVDDemux()
   m_streaminfo = true; /* set to true if we want to look for streams before playback */
   m_checkTransportStream = false;
   m_dtsAtDisplayTime = DVD_NOPTS_VALUE;
+  m_lastDispDts = DVD_NOPTS_VALUE;
 }
 
 CDVDDemuxFFmpeg::~CDVDDemuxFFmpeg()
@@ -800,6 +801,8 @@ bool CDVDDemuxFFmpeg::Open(const std::shared_ptr<CDVDInputStream>& pInput, bool 
 
   m_displayTime = 0;
   m_dtsAtDisplayTime = DVD_NOPTS_VALUE;
+  m_dispAnchorFromOpen = true;
+  m_lastDispDts = DVD_NOPTS_VALUE;
   m_startTime = 0;
   m_seekStream = -1;
 
@@ -875,6 +878,9 @@ void CDVDDemuxFFmpeg::Flush()
 
   m_displayTime = 0;
   m_dtsAtDisplayTime = DVD_NOPTS_VALUE;
+  // after a flush (a seek) the reader is where the next packets come from
+  m_dispAnchorFromOpen = false;
+  m_lastDispDts = DVD_NOPTS_VALUE;
   m_seekToKeyFrame = false;
 
   if (m_pSSIF)
@@ -1362,6 +1368,46 @@ DemuxPacket* CDVDDemuxFFmpeg::ReadInternal(bool keep)
           CDVDDemuxUtils::StoreSideData(pPacket, &m_pkt.pkt);
 
           CDVDInputStream::IDisplayTime* inputStream = m_pInput->GetIDisplayTime();
+#ifdef HAVE_LIBBLURAY
+          // Blu-ray: anchor once per open, at the title time this demuxer's
+          // first read started from, and run each packet's display time off
+          // its own dts. GetTime() is the position of the LAST read; after
+          // the open's stream-info probe it leads the packets handed out here
+          // by everything the probe buffered, so re-anchoring on each change
+          // of it put the display that far ahead until the buffer drained -
+          // ~20 s at Nosferatu's film (DTS-HD MA probes deep), shown on the
+          // intro still playing in front of it. Re-anchor only on a timeline
+          // break (a jump of over a second: a playitem glued onto a running
+          // demuxer, a loop wrap) or after a flush.
+          if (inputStream && m_pInput->IsStreamType(DVDSTREAM_TYPE_BLURAY))
+          {
+            if (pPacket->dts != DVD_NOPTS_VALUE)
+            {
+              const bool timelineBreak =
+                  m_lastDispDts != DVD_NOPTS_VALUE &&
+                  std::abs(pPacket->dts - m_lastDispDts) > DVD_SEC_TO_TIME(1.0);
+              if (m_dtsAtDisplayTime == DVD_NOPTS_VALUE || timelineBreak)
+              {
+                int anchor = inputStream->GetTime();
+                if (m_dispAnchorFromOpen && !timelineBreak)
+                {
+                  const int openTime =
+                      std::static_pointer_cast<CDVDInputStreamBluray>(m_pInput)
+                          ->GetDemuxerOpenTime();
+                  if (openTime >= 0)
+                    anchor = openTime;
+                }
+                m_dispAnchorFromOpen = false;
+                m_displayTime = anchor;
+                m_dtsAtDisplayTime = pPacket->dts;
+              }
+              m_lastDispDts = pPacket->dts;
+              pPacket->dispTime =
+                  m_displayTime + DVD_TIME_TO_MSEC(pPacket->dts - m_dtsAtDisplayTime);
+            }
+          }
+          else
+#endif
           if (inputStream)
           {
             int dispTime = inputStream->GetTime();

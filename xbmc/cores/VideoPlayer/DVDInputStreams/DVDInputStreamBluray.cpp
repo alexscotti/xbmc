@@ -1720,6 +1720,8 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
   int result = 0;
   m_bdjPresentationWait = false;
   m_dispTimeBeforeRead = static_cast<int>((bd_tell_time(m_bd) / 90));
+  if (m_demuxerOpening && m_demuxerOpenTime < 0)
+    m_demuxerOpenTime = m_dispTimeBeforeRead;
   if(m_navmode)
   {
     do {
