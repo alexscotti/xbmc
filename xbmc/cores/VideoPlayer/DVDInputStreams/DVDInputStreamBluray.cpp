@@ -1627,6 +1627,23 @@ bool CDVDInputStreamBluray::ArmSeamlessGlide()
   return false;
 }
 
+// The events HoldForEvent() can hold the stream on.
+static bool IsBoundaryEvent(uint32_t event)
+{
+  switch (event)
+  {
+    case BD_EVENT_SEEK:
+    case BD_EVENT_TITLE:
+    case BD_EVENT_ANGLE:
+    case BD_EVENT_PLAYLIST:
+    case BD_EVENT_PLAYITEM:
+    case BD_EVENT_STILL_TIME:
+      return true;
+    default:
+      return false;
+  }
+}
+
 // Does the event in m_event hold the stream? Read() and PollEvents() share
 // this so a boundary is held the same way whichever path consumed it.
 bool CDVDInputStreamBluray::HoldForEvent()
@@ -1698,13 +1715,43 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
       }
 
       // where a boundary's bytes and its event land, relative to the hold
-      // and the demuxer open (only reads that carry an event)
-      if (m_event.event != BD_EVENT_NONE)
+      // and the demuxer open (only reads that carry data and an event)
+      if (result > 0 && m_event.event != BD_EVENT_NONE)
         CLog::Log(LOGDEBUG,
                   "CDVDInputStreamBluray::Read - {} bytes with event {} ({}), hold {}, "
                   "opening {}, pos {}",
                   result, m_event.event, m_event.param, static_cast<int>(m_hold),
                   m_demuxerOpening, bd_tell(m_bd));
+
+      // libbluray hands back one event per read, and a boundary's first bytes
+      // come with whichever event is first in its queue - not necessarily the
+      // boundary's own. Gangs of New York's 00012.mpls is four one-frame
+      // playitems cut from one clip: each seam's first 4096 bytes (the
+      // sequence header and the start of the item's only frame) came with
+      // BD_EVENT_UO_MASK_CHANGED, went to the outgoing demuxer, and the
+      // PLAYITEM followed on the next, empty read with nothing left to hold.
+      // Every item's frame was then dropped as corrupt, and the last item -
+      // one frame long - opened with no sequence header ("require extradata"):
+      // 11 s of black between the menu and the film. Take the events queued
+      // behind it now: a boundary among them owns these bytes, and is held
+      // with them exactly as if it had come first.
+      if (result > 0 && m_event.event != BD_EVENT_NONE && !IsBoundaryEvent(m_event.event))
+      {
+        BD_EVENT next;
+        while (bd_get_event(m_bd, &next))
+        {
+          ProcessEvent();
+          m_event = next;
+          if (IsBoundaryEvent(m_event.event))
+          {
+            CLog::Log(LOGDEBUG,
+                      "CDVDInputStreamBluray::Read - {} bytes belong to boundary event {} ({}) "
+                      "queued behind another",
+                      result, m_event.event, m_event.param);
+            break;
+          }
+        }
+      }
 
       StampBdjPending();
 
