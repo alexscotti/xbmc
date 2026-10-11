@@ -1988,10 +1988,38 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
     auto lastProgress = std::chrono::steady_clock::now();
     int lastLevel = m_VideoPlayerAudio->GetLevel();
     double lastPts = m_VideoPlayerAudio->GetCurrentPts();
+    // The segment's queued audio can itself cross an in-queue codec change (a
+    // tail clip joined with DRAIN_KEEP_VIDEO). The reopened audio player then
+    // fills its cache, posts PLAYER_STARTED and waits for the resync only this
+    // thread sends - Nosferatu (1922)'s 10.7 s LPCM tail stalled there, this
+    // wait gave up and CloseStream discarded 10.4 s of it unplayed, with
+    // Player.Time standing still. Answer that handshake as the start sync does
+    // with video in sync; hold every other message and put them back, in
+    // order, after the wait.
+    std::vector<std::pair<std::shared_ptr<CDVDMsg>, int>> held;
     while (!m_bAbortRequest && m_VideoPlayerAudio->HasData() &&
            std::chrono::steady_clock::now() < ceiling)
     {
-      CThread::Sleep(100ms);
+      std::shared_ptr<CDVDMsg> msg;
+      int priority = 0;
+      if (m_messenger.Get(msg, 100ms, priority) == MSGQ_OK)
+      {
+        if (msg->IsType(CDVDMsg::PLAYER_STARTED) &&
+            std::static_pointer_cast<CDVDMsgType<SStartMsg>>(msg)->m_value.player ==
+                VideoPlayer_AUDIO)
+        {
+          CLog::Log(LOGINFO,
+                    "VideoPlayer: segment drain - audio restarted in its queue, resyncing it "
+                    "at clock {:.3f}",
+                    m_clock.GetClock() / DVD_TIME_BASE);
+          m_CurrentAudio.syncState = IDVDStreamPlayer::SYNC_INSYNC;
+          m_CurrentAudio.avsync = CCurrentStream::AV_SYNC_NONE;
+          m_VideoPlayerAudio->SendMessage(
+              std::make_shared<CDVDMsgDouble>(CDVDMsg::GENERAL_RESYNC, m_clock.GetClock()), 1);
+        }
+        else
+          held.emplace_back(std::move(msg), priority);
+      }
       AdvancePlayTime();
       const int level = m_VideoPlayerAudio->GetLevel();
       const double pts = m_VideoPlayerAudio->GetCurrentPts();
@@ -2005,6 +2033,10 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
       else if (now - lastProgress > 1500ms)
         break;
     }
+    // Get takes from the back and PutBack puts there: reversed, the held
+    // messages come out again in the order they arrived
+    for (auto it = held.rbegin(); it != held.rend(); ++it)
+      m_messenger.PutBack(it->first, it->second);
   }
   CloseStream(m_CurrentAudio, drain);
   CloseStream(m_CurrentVideo, drain);
