@@ -1921,33 +1921,28 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
 
   if (transition == EBdTransition::DRAIN_KEEP_VIDEO)
   {
-    // Render the old audio out and close it; leave the video player running
-    // with its queue (it presents on while audio drains) and reattach its
-    // decoder to the new demuxer's stream. Nothing is flushed, so the video
-    // timeline continues: the new clip's forward jump is one CheckContinuity
-    // correction. Audio's last dts is kept for that check, so whichever
-    // stream's first packet arrives first takes the correction - a stream
-    // without one would reach the player a clip's gap ahead of the other.
-    // The new audio stream then opens and syncs to the running clock.
+    // DISCARD_KEEPALIVE without the discard: both stream players keep
+    // running with their queues, nothing is flushed, and the new demuxer's
+    // streams attach to them - video reattaches its decoder (the compare
+    // ignores the clips' parameter sets), audio's format differs so its
+    // reopen is the running player's in-queue codec change, taken behind the
+    // old clip's last audio packet: the intro's sound plays out, the sink
+    // switches to the film's format and audio syncs to the running clock, as
+    // an audio track switch does. The demuxer reads on throughout, so
+    // neither queue runs dry at the join. The new clip's forward timestamp
+    // jump is one CheckContinuity correction on whichever stream's packet
+    // comes first.
+    //
+    // Measured before, with audio rendered out and closed first: the player
+    // thread blocked for the 9.6 s of queued intro audio, the video queue ran
+    // dry under it, and the decoder's last pictures came out through the
+    // fill gate's starve probe (gaps of 167-375 ms), then a ~390 ms hold
+    // while the demuxer reopened.
     CLog::Log(LOGINFO, "VideoPlayer: next stream, audio changes and video continues - "
-                       "draining and reopening audio, keeping the video decoder");
+                       "keeping both players, reopening audio in-queue");
     m_bdStreamReuseVideo = true;
     m_bdStreamReuseVideoInband = true;
     m_bdStreamReuseAudio = false;
-    // The player thread waits below for audio to play out, so no packet
-    // reaches the video queue meanwhile: it empties while the decoder still
-    // holds the clip's last pictures, and with its input stopped the
-    // hardware decoder's fill gate lets them out only through the starve
-    // probe - Nosferatu's intro ended in gaps of 167-375 ms over ~2 s with
-    // the decoder kept. Queue a drain behind the clip's last packet so those
-    // pictures present at their own times; the next packet's codec control
-    // (no DRAIN) ends it and the new clip decodes on.
-    m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN), 0);
-    const double audioDts = m_CurrentAudio.dts;
-    CloseStream(m_CurrentAudio, true);
-    m_CurrentAudio.Clear();
-    m_CurrentAudio.dts = audioDts;
-    m_CurrentSubtitle.Clear();
     m_seamStepPending = false;
     m_seamStepArmedDts = DVD_NOPTS_VALUE;
     return;
