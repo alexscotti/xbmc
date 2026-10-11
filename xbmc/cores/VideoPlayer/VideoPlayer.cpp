@@ -1934,6 +1934,15 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
     m_bdStreamReuseVideo = true;
     m_bdStreamReuseVideoInband = true;
     m_bdStreamReuseAudio = false;
+    // The player thread waits below for audio to play out, so no packet
+    // reaches the video queue meanwhile: it empties while the decoder still
+    // holds the clip's last pictures, and with its input stopped the
+    // hardware decoder's fill gate lets them out only through the starve
+    // probe - Nosferatu's intro ended in gaps of 167-375 ms over ~2 s with
+    // the decoder kept. Queue a drain behind the clip's last packet so those
+    // pictures present at their own times; the next packet's codec control
+    // (no DRAIN) ends it and the new clip decodes on.
+    m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN), 0);
     const double audioDts = m_CurrentAudio.dts;
     CloseStream(m_CurrentAudio, true);
     m_CurrentAudio.Clear();
