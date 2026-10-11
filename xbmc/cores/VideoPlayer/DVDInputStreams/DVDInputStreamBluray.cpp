@@ -1697,6 +1697,15 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
         return result;
       }
 
+      // where a boundary's bytes and its event land, relative to the hold
+      // and the demuxer open (only reads that carry an event)
+      if (m_event.event != BD_EVENT_NONE)
+        CLog::Log(LOGDEBUG,
+                  "CDVDInputStreamBluray::Read - {} bytes with event {} ({}), hold {}, "
+                  "opening {}, pos {}",
+                  result, m_event.event, m_event.param, static_cast<int>(m_hold),
+                  m_demuxerOpening, bd_tell(m_bd));
+
       StampBdjPending();
 
       if (HoldForEvent())
