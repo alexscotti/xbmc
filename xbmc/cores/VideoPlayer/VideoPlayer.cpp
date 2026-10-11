@@ -6035,6 +6035,14 @@ bool CVideoPlayer::OpenVideoStream(CDVDStreamInfo& hint, bool reset)
               reuse ? "MATCH, reattaching running decoder" : "no format match, normal reopen",
               m_bdStreamReuseVideoInband ? " (parameter sets in-band)" : "");
   }
+  // DRAIN_KEEP_VIDEO's reattach continues a stream that was never flushed:
+  // its queue still holds the old clip's last packets and the decoder its
+  // last pictures. The GENERAL_RESET a reattach otherwise queues (right after
+  // DISCARD_KEEPALIVE's flush) would reset the decoder at the join - losing
+  // those pictures - and drop video back into the start handshake, so the
+  // in-queue audio format change then re-based the clock for both: Nosferatu
+  // skipped the intro's last 1.6 s and held its picture 2 s.
+  const bool continuing = reuse && m_bdStreamReuseVideoInband;
   // one-shot: each open decision consumes its own flag (streams may be opened
   // lazily per-packet in either order when the disc dictates them, so the
   // flags cannot be cleared on a fixed point in the reopen path)
@@ -6077,7 +6085,7 @@ bool CVideoPlayer::OpenVideoStream(CDVDStreamInfo& hint, bool reset)
     m_CurrentVideo.syncState = IDVDStreamPlayer::SYNC_STARTING;
     m_CurrentVideo.packets = 0;
   }
-  else if (reset)
+  else if (reset && !continuing)
     player->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::GENERAL_RESET), 0);
 
   m_HasVideo = true;
