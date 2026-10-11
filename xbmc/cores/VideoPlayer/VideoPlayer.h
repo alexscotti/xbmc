@@ -719,6 +719,8 @@ protected:
   // own queue is full - the shape a dead player thread leaves behind.
   bool m_syncStuckArmed = false;
   XbmcThreads::EndTime<> m_syncStuckTimer;
+  // the disc-still sync exception (HandlePlaySpeed) has been logged for this wait
+  bool m_stillSyncLogged = false;
   int m_audioPlayerRestarts = 0;
   int m_videoPlayerRestarts = 0;
   // consecutive polls that saw the player dead - a deliberate self-stop is

@@ -3245,9 +3245,28 @@ void CVideoPlayer::HandlePlaySpeed()
     bool video = (m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_WAITSYNC) ||
                  (m_CurrentVideo.packets == 0 && m_CurrentAudio.packets > threshold) ||
                  (!m_VideoPlayerAudio->AcceptsData() && m_processInfo->GetLevelVQ() < 10);
+    // A disc still: the picture is at the handshake and no more data is coming
+    // until the still ends, so audio that has not arrived never will. Digital
+    // Video Essentials' menu background (00050.mpls) is one MPEG-2 frame and
+    // ~40 ms of AC-3 under an infinite still: audio never reached WAITSYNC with
+    // so little, video never filled a queue, the sync never committed, and the
+    // player never announced the streams - Kodi sat on its busy dialog over the
+    // home screen with the clock running and the menu never shown.
+    const bool stillWithoutAudio = m_dvd.state == DVDSTATE_STILL && m_CurrentAudio.id >= 0 &&
+                                   m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_WAITSYNC &&
+                                   m_CurrentAudio.syncState != IDVDStreamPlayer::SYNC_WAITSYNC;
+    if (stillWithoutAudio && !m_stillSyncLogged)
+    {
+      m_stillSyncLogged = true;
+      CLog::Log(LOGINFO, "VideoPlayer::Sync - disc still with the picture at the handshake and "
+                         "audio short of it: syncing without waiting for audio");
+    }
+    else if (!stillWithoutAudio)
+      m_stillSyncLogged = false;
     bool audio = m_CurrentAudio.id < 0 || (m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_WAITSYNC) ||
                  (m_CurrentAudio.packets == 0 && m_CurrentVideo.packets > threshold) ||
-                 (!m_VideoPlayerVideo->AcceptsData() && m_VideoPlayerAudio->GetLevel() < 10);
+                 (!m_VideoPlayerVideo->AcceptsData() && m_VideoPlayerAudio->GetLevel() < 10) ||
+                 stillWithoutAudio;
 
     const bool syncAudio = m_CurrentAudio.syncState == IDVDStreamPlayer::SYNC_WAITSYNC &&
                            (m_CurrentAudio.avsync == CCurrentStream::AV_SYNC_CONT ||
