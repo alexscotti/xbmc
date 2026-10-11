@@ -551,6 +551,33 @@ bool CDVDDemuxFFmpeg::Open(const std::shared_ptr<CDVDInputStream>& pInput, bool 
                          "empty. Please report this bug.");
   }
 
+#ifdef HAVE_LIBBLURAY
+  // Blu-ray interactive graphics (the disc's menu, drawn by libbluray) before
+  // the stream info probe: ffmpeg has no codec for the IG stream type and
+  // probes its payload, which can pass for MPEG audio with no channels - a
+  // stream whose parameters never complete, so the probe reads to its 10 MB
+  // limit or the end of the playlist. Basic Instinct's language select is a
+  // 2.4 MB, 60 s loop: the open read all of it (3.05 MB with re-reads),
+  // libbluray reached the end of the title and its program restarted the
+  // playlist - resetting the IG menu - before the first frame was shown, so
+  // no key ever reached a menu. A discarded PID is skipped before probing,
+  // and as a data stream the probe does not wait for it (measured on that
+  // clip: 3,053,712 bytes read; discarded 577,680; discarded and marked data
+  // 315,536). AddStream drops it either way.
+  if (isBluray && m_pFormatContext->streams != nullptr)
+  {
+    for (unsigned int i = 0; i < m_pFormatContext->nb_streams; i++)
+    {
+      AVStream* st = m_pFormatContext->streams[i];
+      if (st && st->id >= HDMV_PID_IG_FIRST && st->id <= HDMV_PID_IG_LAST)
+      {
+        st->discard = AVDISCARD_ALL;
+        st->codecpar->codec_type = AVMEDIA_TYPE_DATA;
+      }
+    }
+  }
+#endif
+
   // These codecs need full analysis: HEVC/VVC params break on reopen or a truncated
   // probe; DTS/TrueHD channel and extension detection is unreliable at a short probe.
   bool skipTsOptimization = false;
