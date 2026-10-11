@@ -33,7 +33,6 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
-#include <optional>
 #include <sstream>
 #include <chrono>
 
@@ -566,32 +565,14 @@ void CVideoPlayerVideo::Process()
       // than the render queue covers: late frames dropped, gaps of 209-459 ms
       // growing to the end (Memento's title end, kernel presentation trace).
       // Bounded: a decoder that never reports EOF costs 3 s here, no more.
-      // End of stream is not final at once either: the Amlogic decoder
-      // reports it as soon as its input buffer is empty, while the hardware
-      // may still be finishing the last pictures - Memento's title end then
-      // went 447 ms without a picture before the still pump found them (a
-      // 125 ms gap in the presentation trace). Keep asking for a short grace.
       const auto drainEnd = std::chrono::steady_clock::now() + 3s;
-      std::optional<std::chrono::steady_clock::time_point> eofSince;
       while (!m_bStop && m_pVideoCodec && !m_messageQueue.ReceivedAbortRequest())
       {
         m_pVideoCodec->SetCodecControl(DVD_CODEC_CTRL_DRAIN);
         if (ProcessDecoderOutput(frametime, pts))
-        {
-          eofSince.reset();
           continue;
-        }
-        const auto now = std::chrono::steady_clock::now();
-        if (now > drainEnd)
-          break;
-        if (m_lastDecoderState == CDVDVideoCodec::VC_EOF)
-        {
-          if (!eofSince)
-            eofSince = now;
-          else if (now - *eofSince > 250ms)
-            break;
-        }
-        else if (m_lastDecoderState != CDVDVideoCodec::VC_BUFFER)
+        if (m_lastDecoderState != CDVDVideoCodec::VC_BUFFER ||
+            std::chrono::steady_clock::now() > drainEnd)
           break;
         CThread::Sleep(10ms);
       }
