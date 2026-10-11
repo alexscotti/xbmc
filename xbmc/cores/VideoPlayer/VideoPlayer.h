@@ -565,6 +565,8 @@ protected:
   void UpdateHasVideoAudio();
 
   void UpdatePlayState(double timeout);
+  // the play time alone, from the clock and the last derived offset (a segment drain)
+  void AdvancePlayTime();
   void GetGeneralInfo(std::string& strVideoInfo);
   int64_t GetUpdatedTime();
   int64_t GetTime() const;

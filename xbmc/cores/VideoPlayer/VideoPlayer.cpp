@@ -1976,7 +1976,10 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
   // out, and the play state (Player.Time, the OSD clock) is only refreshed
   // from here: it stood still for the whole drain - the last ~15 s of every
   // title that ends in one (Terminator 2, Memento, Dude, Where's My Car?).
-  // Wait for the playout here instead, refreshing it; CloseStream below then
+  // Wait for the playout here instead, advancing it (AdvancePlayTime - the
+  // demuxer is already closed, so the full UpdatePlayState would recompute
+  // the offset from a torn-down state: Terminator 2 read -8 h, then ran
+  // backwards by ~35 h a second); CloseStream below then
   // finds the queue empty, or takes over with its own rules if this gives up
   // (no progress for 1.5 s, or the 30 s ceiling).
   if (drain && m_CurrentAudio.id >= 0)
@@ -1989,7 +1992,7 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
            std::chrono::steady_clock::now() < ceiling)
     {
       CThread::Sleep(100ms);
-      UpdatePlayState(0);
+      AdvancePlayTime();
       const int level = m_VideoPlayerAudio->GetLevel();
       const double pts = m_VideoPlayerAudio->GetCurrentPts();
       const auto now = std::chrono::steady_clock::now();
@@ -7470,6 +7473,21 @@ int ToVisibleChapter(const std::vector<int>& rawChapters, int rawChapter)
   return 0;
 }
 } // namespace
+
+void CVideoPlayer::AdvancePlayTime()
+{
+  // The play time is the clock plus the offset UpdatePlayState last derived
+  // (both of its time branches reduce to that); advance just the time, never
+  // backwards and never past the title's end.
+  std::unique_lock lock(m_StateSection);
+  double time = DVD_TIME_TO_MSEC(m_clock.GetClock() + m_State.time_offset);
+  if (m_State.timeMax > 0 && time > m_State.timeMax)
+    time = m_State.timeMax;
+  if (time <= m_State.time)
+    return;
+  m_State.time = time;
+  m_processInfo->SetPlayTimes(m_State.startTime, m_State.time, m_State.timeMin, m_State.timeMax);
+}
 
 void CVideoPlayer::UpdatePlayState(double timeout)
 {
