@@ -535,6 +535,8 @@ protected:
     SEAMLESS, // same-playlist playitem advance from a stable pipeline
     DISCARD_KEEPALIVE, // menu->title jump (HDMV): drop queues, keep decoders
     DISCARD_CLOSE, // menu->title jump (BD-J): drop queues, full close
+    DRAIN_KEEP_VIDEO, // playitem whose audio changes, video not (HDMV): render
+                      // out and reopen audio only, keep the video decoder
     DRAIN, // default: render out the old streams, then close
   };
   EBdTransition ClassifyBdTransition() const;
@@ -755,6 +757,11 @@ protected:
   // its own flag. Player thread only.
   bool m_bdStreamReuseVideo = false;
   bool m_bdStreamReuseAudio = false;
+  // DRAIN_KEEP_VIDEO's reattach: the two clips' parameter sets differ (each
+  // was encoded on its own) while the format is the same, and the hardware
+  // H.264/HEVC decoder takes them in-band at every IDR - compare without
+  // extradata. Consumed with m_bdStreamReuseVideo.
+  bool m_bdStreamReuseVideoInband = false;
   /* Armed at a Blu-ray seamless playitem boundary, consumed by the first
    * sub-second FORWARD timestamp step CheckContinuity sees afterwards - or, on a
    * glided (cc 5/6) seam (m_seamStepOverlapOk), by the first sub-second

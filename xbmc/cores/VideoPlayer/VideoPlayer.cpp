@@ -1751,6 +1751,25 @@ CVideoPlayer::EBdTransition CVideoPlayer::ClassifyBdTransition() const
     if (bluray->IsSeamlessStreamChange() && m_CurrentVideo.id >= 0 &&
         m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_INSYNC)
       return EBdTransition::SEAMLESS;
+
+    // A playitem advance that is not seamless only because the AUDIO changes:
+    // Nosferatu (1922) joins its 10 s intro (LPCM) to the film (DTS-HD MA)
+    // over the same 1080p24 H.264. The full drain closed and reopened the
+    // video decoder too, and the restart handshake that follows - with the
+    // audio sink reopening for passthrough - presented the join as ~2 s of
+    // stutter (gaps of 125-584 ms). Keep the video decoder and reopen audio
+    // alone, as an audio track switch does. HDMV only, as DISCARD_KEEPALIVE
+    // (the BD-J keep-alive teardown hazard); a hardware H.264/HEVC decoder,
+    // which takes the new clip's parameter sets in-band; never Dolby Vision,
+    // whose dual-layer state is per segment.
+    if (bluray->IsVideoContinuingStreamChange() && !bluray->HasBDJTitles() &&
+        m_CurrentVideo.id >= 0 &&
+        m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_INSYNC &&
+        m_processInfo && m_processInfo->IsVideoHwDecoder() &&
+        (m_CurrentVideo.hint.codec == AV_CODEC_ID_H264 ||
+         m_CurrentVideo.hint.codec == AV_CODEC_ID_HEVC) &&
+        m_CurrentVideo.hint.hdrType != StreamHdrType::HDR_TYPE_DOLBYVISION)
+      return EBdTransition::DRAIN_KEEP_VIDEO;
   }
 #endif
   return EBdTransition::DRAIN;
@@ -1897,6 +1916,31 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
     // running decoders survive for reattach
     CLog::Log(LOGINFO, "VideoPlayer: next stream, discarding abandoned stream remainder");
     FlushBuffers(DVD_NOPTS_VALUE, false, true);
+    return;
+  }
+
+  if (transition == EBdTransition::DRAIN_KEEP_VIDEO)
+  {
+    // Render the old audio out and close it; leave the video player running
+    // with its queue (it presents on while audio drains) and reattach its
+    // decoder to the new demuxer's stream. Nothing is flushed, so the video
+    // timeline continues: the new clip's forward jump is one CheckContinuity
+    // correction. Audio's last dts is kept for that check, so whichever
+    // stream's first packet arrives first takes the correction - a stream
+    // without one would reach the player a clip's gap ahead of the other.
+    // The new audio stream then opens and syncs to the running clock.
+    CLog::Log(LOGINFO, "VideoPlayer: next stream, audio changes and video continues - "
+                       "draining and reopening audio, keeping the video decoder");
+    m_bdStreamReuseVideo = true;
+    m_bdStreamReuseVideoInband = true;
+    m_bdStreamReuseAudio = false;
+    const double audioDts = m_CurrentAudio.dts;
+    CloseStream(m_CurrentAudio, true);
+    m_CurrentAudio.Clear();
+    m_CurrentAudio.dts = audioDts;
+    m_CurrentSubtitle.Clear();
+    m_seamStepPending = false;
+    m_seamStepArmedDts = DVD_NOPTS_VALUE;
     return;
   }
 
@@ -2132,6 +2176,7 @@ void CVideoPlayer::Prepare()
   m_SpeedState.Reset(DVD_NOPTS_VALUE);
   m_offset_pts = 0;
   m_bdStreamReuseVideo = false;
+  m_bdStreamReuseVideoInband = false;
   m_bdStreamReuseAudio = false;
   m_menuWrapVideoGap = 0.0;
   m_timelineRestartStamped = false;
@@ -5978,14 +6023,19 @@ bool CVideoPlayer::OpenVideoStream(CDVDStreamInfo& hint, bool reset)
     CDVDStreamInfo cmp(hint);
     if (!stillsSelectsDecMode)
       cmp.stills = m_CurrentVideo.hint.stills;
-    reuse = m_CurrentVideo.hint.Equal(cmp, CDVDStreamInfo::COMPARE_ALL & ~CDVDStreamInfo::COMPARE_ID);
-    CLog::Log(LOGINFO, "CVideoPlayer::OpenVideoStream - BD stream reuse {}",
-              reuse ? "MATCH, reattaching running decoder" : "no format match, normal reopen");
+    int compare = CDVDStreamInfo::COMPARE_ALL & ~CDVDStreamInfo::COMPARE_ID;
+    if (m_bdStreamReuseVideoInband)
+      compare &= ~CDVDStreamInfo::COMPARE_EXTRADATA;
+    reuse = m_CurrentVideo.hint.Equal(cmp, compare);
+    CLog::Log(LOGINFO, "CVideoPlayer::OpenVideoStream - BD stream reuse {}{}",
+              reuse ? "MATCH, reattaching running decoder" : "no format match, normal reopen",
+              m_bdStreamReuseVideoInband ? " (parameter sets in-band)" : "");
   }
   // one-shot: each open decision consumes its own flag (streams may be opened
   // lazily per-packet in either order when the disc dictates them, so the
   // flags cannot be cleared on a fixed point in the reopen path)
   m_bdStreamReuseVideo = false;
+  m_bdStreamReuseVideoInband = false;
 
   if(!reuse && (m_CurrentVideo.id < 0 ||
      m_CurrentVideo.hint != hint))

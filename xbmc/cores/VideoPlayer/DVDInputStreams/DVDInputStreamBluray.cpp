@@ -152,6 +152,24 @@ bool CDVDInputStreamBluray::ClipFormatsMatch(const BLURAY_CLIP_INFO* a,
   return true;
 }
 
+bool CDVDInputStreamBluray::ClipVideoFormatsMatch(const BLURAY_CLIP_INFO* a,
+                                                  const BLURAY_CLIP_INFO* b)
+{
+  if (!a || !b || a->video_stream_count == 0 ||
+      a->video_stream_count != b->video_stream_count)
+    return false;
+  for (uint8_t i = 0; i < a->video_stream_count; i++)
+  {
+    const BLURAY_STREAM_INFO& va = a->video_streams[i];
+    const BLURAY_STREAM_INFO& vb = b->video_streams[i];
+    if (va.coding_type != vb.coding_type || va.format != vb.format ||
+        va.rate != vb.rate || va.aspect != vb.aspect ||
+        va.dynamic_range_type != vb.dynamic_range_type)
+      return false;
+  }
+  return true;
+}
+
 void CDVDInputStreamBluray::UpdateLibblurayDebugMask()
 {
   // DBG_HDMV traces the HDMV VM instruction stream (MovieObject + decrypted
@@ -953,6 +971,7 @@ void CDVDInputStreamBluray::ProcessEvent() {
   case BD_EVENT_TITLE:
   case BD_EVENT_PLAYLIST_STOP:
     m_seamlessHold = false;
+    m_seamVideoContinues = false;
     // whatever voids the hold voids an armed-but-uncollected glide with it
     CancelPendingSeamlessTransition();
     break;
@@ -960,7 +979,10 @@ void CDVDInputStreamBluray::ProcessEvent() {
     // menu-loop wraps re-announce the current angle alongside the PLAYLIST
     // re-selection; only a REAL angle change voids the seamless hold.
     if (m_event.param != m_angle)
+    {
       m_seamlessHold = false;
+      m_seamVideoContinues = false;
+    }
     break;
   case BD_EVENT_PLAYLIST:
     // a PLAYLIST event naming the playlist that is already playing is a menu
@@ -969,7 +991,10 @@ void CDVDInputStreamBluray::ProcessEvent() {
     // the player consults IsSeamlessStreamChange(), so voiding here would
     // defeat the wrap hold every time. Only a CHANGE of playlist voids.
     if (m_event.param != m_playlist)
+    {
       m_seamlessHold = false;
+      m_seamVideoContinues = false;
+    }
     break;
   default:
     break;
@@ -1580,6 +1605,7 @@ bool CDVDInputStreamBluray::ArmSeamlessGlide()
   // clips' stream attributes and fall back to the full reopen path
   // on any mismatch (review finding A10)
   const BLURAY_CLIP_INFO* next = nullptr;
+  m_seamVideoContinues = false;
   if (m_seamlessHold && m_titleInfo)
   {
     if (m_event.event == BD_EVENT_PLAYITEM &&
@@ -1590,11 +1616,17 @@ bool CDVDInputStreamBluray::ArmSeamlessGlide()
       next = &m_titleInfo->clips[0];
     if (!ClipFormatsMatch(m_clip, next))
     {
+      // A playitem advance whose VIDEO carries on unchanged - only the audio
+      // (or its stream count) differs - can keep the video decoder: the
+      // player rebuilds the demuxer and reopens audio only (DRAIN_KEEP_VIDEO).
+      m_seamVideoContinues =
+          m_event.event == BD_EVENT_PLAYITEM && ClipVideoFormatsMatch(m_clip, next);
       CLog::Log(LOGDEBUG,
                 "CDVDInputStreamBluray - seam stream-attribute "
                 "change at {} {}: dropping seamless hold, full "
-                "reopen", m_event.event == BD_EVENT_PLAYITEM
-                    ? "playitem" : "playlist wrap", m_event.param);
+                "reopen{}", m_event.event == BD_EVENT_PLAYITEM
+                    ? "playitem" : "playlist wrap", m_event.param,
+                m_seamVideoContinues ? " (video continues)" : "");
       m_seamlessHold = false;
     }
   }
@@ -1877,7 +1909,11 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
       // Direct playlist playback never holds; a seamless playitem seam still
       // needs the player's seamless transition (seam-step, FEL segment reset).
       if (m_event.event == BD_EVENT_PLAYITEM && !ArmSeamlessGlide())
+      {
         m_seamlessHold = false;
+        // no transition but the seamless one runs here (no teardown to spare)
+        m_seamVideoContinues = false;
+      }
       ProcessEvent();
     }
   }

@@ -324,6 +324,13 @@ public:
    * ~24s segment. Cleared by any playlist-scope event (playlist/title/seek/
    * angle), so playlist changes and seeks still take the full reopen. */
   bool IsSeamlessStreamChange() const { return m_seamlessHold; }
+  /* A playitem advance that is NOT seamless only because the audio differs:
+   * the video streams match across the seam (codec, format, rate, aspect,
+   * dynamic range), so the player may keep the video decoder and reopen the
+   * audio alone (VideoPlayer DRAIN_KEEP_VIDEO). Nosferatu (1922): the intro's
+   * LPCM gives way to the film's DTS-HD MA over the same 1080p24 H.264.
+   * Voided with the seamless hold. */
+  bool IsVideoContinuingStreamChange() const { return m_seamVideoContinues; }
   // set by the demuxer while it opens on this stream (format probe and
   // stream-info analysis) - see Read()
   void SetDemuxerOpening(bool opening)
@@ -553,6 +560,7 @@ protected:
   std::chrono::milliseconds ChapterPosDemux(int ch) const;
   bool m_menuAtHold = false;
   bool m_seamlessHold = false;
+  bool m_seamVideoContinues = false;
   bool m_seamlessCarry = false;
   // the carry state in force when the current bd_read_ext() call was made (see Read)
   bool m_carryAtRead = false;
@@ -815,6 +823,8 @@ protected:
      * attribute/STN changes, and a format change must never be glued into
      * live decoders (falls back to the full-reopen path instead) */
     static bool ClipFormatsMatch(const BLURAY_CLIP_INFO* a, const BLURAY_CLIP_INFO* b);
+    /* the video streams alone (see IsVideoContinuingStreamChange) */
+    static bool ClipVideoFormatsMatch(const BLURAY_CLIP_INFO* a, const BLURAY_CLIP_INFO* b);
     /* IG button sound effects (sound.bdmv): decoded LPCM from libbluray,
      * cached as AE sounds at open, fired by BD_EVENT_SOUND_EFFECT */
     void LoadMenuSounds();
