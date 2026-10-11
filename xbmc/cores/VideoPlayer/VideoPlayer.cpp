@@ -1972,6 +1972,37 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
   // own times; CloseStream(video) below queues another and waits as before.
   if (drain && m_CurrentVideo.id >= 0)
     m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN), 0);
+  // CloseStream(audio) blocks this thread until the audio queue has played
+  // out, and the play state (Player.Time, the OSD clock) is only refreshed
+  // from here: it stood still for the whole drain - the last ~15 s of every
+  // title that ends in one (Terminator 2, Memento, Dude, Where's My Car?).
+  // Wait for the playout here instead, refreshing it; CloseStream below then
+  // finds the queue empty, or takes over with its own rules if this gives up
+  // (no progress for 1.5 s, or the 30 s ceiling).
+  if (drain && m_CurrentAudio.id >= 0)
+  {
+    const auto ceiling = std::chrono::steady_clock::now() + 30s;
+    auto lastProgress = std::chrono::steady_clock::now();
+    int lastLevel = m_VideoPlayerAudio->GetLevel();
+    double lastPts = m_VideoPlayerAudio->GetCurrentPts();
+    while (!m_bAbortRequest && m_VideoPlayerAudio->HasData() &&
+           std::chrono::steady_clock::now() < ceiling)
+    {
+      CThread::Sleep(100ms);
+      UpdatePlayState(0);
+      const int level = m_VideoPlayerAudio->GetLevel();
+      const double pts = m_VideoPlayerAudio->GetCurrentPts();
+      const auto now = std::chrono::steady_clock::now();
+      if (level != lastLevel || pts != lastPts || m_clock.IsPaused())
+      {
+        lastProgress = now;
+        lastLevel = level;
+        lastPts = pts;
+      }
+      else if (now - lastProgress > 1500ms)
+        break;
+    }
+  }
   CloseStream(m_CurrentAudio, drain);
   CloseStream(m_CurrentVideo, drain);
 
