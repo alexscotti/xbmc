@@ -725,6 +725,10 @@ protected:
   XbmcThreads::EndTime<> m_syncStuckTimer;
   // the disc-still sync exception (HandlePlaySpeed) has been logged for this wait
   bool m_stillSyncLogged = false;
+  // consecutive NEXTSTREAM_RETRY polls with no packet read since
+  int m_inputRetryPolls = 0;
+  // a packet has been read since the last stream open and no drain sent since
+  bool m_inputDrainArmed = false;
   int m_audioPlayerRestarts = 0;
   int m_videoPlayerRestarts = 0;
   // consecutive polls that saw the player dead - a deliberate self-stop is

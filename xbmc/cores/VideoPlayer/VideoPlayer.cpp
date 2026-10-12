@@ -2708,6 +2708,11 @@ void CVideoPlayer::Process()
     }
 
     emptyPackets = 0;
+    if (pPacket)
+    {
+      m_inputRetryPolls = 0;
+      m_inputDrainArmed = true;
+    }
 
     if (!pPacket)
     {
@@ -2742,6 +2747,7 @@ void CVideoPlayer::Process()
       CDVDInputStream::ENextStream next = m_pInputStream->NextStream();
       if(next == CDVDInputStream::NEXTSTREAM_OPEN)
       {
+        m_inputDrainArmed = false;
         BdSegmentTransition();
         continue;
       }
@@ -2749,6 +2755,23 @@ void CVideoPlayer::Process()
       // input stream asked us to just retry
       if(next == CDVDInputStream::NEXTSTREAM_RETRY)
       {
+        // A BD-J title that has ended sits here, polling, until its Java app
+        // starts the next playlist - Devil in a Blue Dress for 6 s. Nothing
+        // asks the video decoder to drain meanwhile, so the fill gate holds
+        // the title's last pictures: they leaked out through the starve probe
+        // every ~420 ms and the still-frame pump jumped pts 4 frames, a
+        // 209 ms pause near the end of every such title (DV FEL: Babylon,
+        // Gojira -1.0, Kingdom of Heaven). Once the wait has lasted three
+        // polls, queue one drain behind the last packet; packets flowing
+        // again re-arm it. Only after packets since the last stream open: a
+        // drain reaching a decoder that has had no data waits out its 3 s
+        // bound with the video thread blocked.
+        if (++m_inputRetryPolls >= 3 && m_inputDrainArmed && m_CurrentVideo.id >= 0)
+        {
+          m_inputDrainArmed = false;
+          CLog::Log(LOGINFO, "VideoPlayer: input waiting at the end of its stream - draining video");
+          m_VideoPlayerVideo->SendMessage(std::make_shared<CDVDMsg>(CDVDMsg::VIDEO_DRAIN), 0);
+        }
         CThread::Sleep(100ms);
         continue;
       }
