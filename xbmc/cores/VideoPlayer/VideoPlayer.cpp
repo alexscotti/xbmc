@@ -2765,8 +2765,13 @@ void CVideoPlayer::Process()
         // polls, queue one drain behind the last packet; packets flowing
         // again re-arm it. Only after packets since the last stream open: a
         // drain reaching a decoder that has had no data waits out its 3 s
-        // bound with the video thread blocked.
-        if (++m_inputRetryPolls >= 3 && m_inputDrainArmed && m_CurrentVideo.id >= 0)
+        // bound with the video thread blocked. And only with video in sync: a
+        // menu still (Beavis and Butt-Head Do America, Beverly Hills Cop: two
+        // pictures) reaches this wait before its start sync, and a drain then
+        // released the picture against the previous playlist's clock - 22 s
+        // late, dropped - and the menu stayed black.
+        if (++m_inputRetryPolls >= 3 && m_inputDrainArmed && m_CurrentVideo.id >= 0 &&
+            m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_INSYNC)
         {
           m_inputDrainArmed = false;
           CLog::Log(LOGINFO, "VideoPlayer: input waiting at the end of its stream - draining video");
