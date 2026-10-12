@@ -2038,6 +2038,36 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
     for (auto it = held.rbegin(); it != held.rend(); ++it)
       m_messenger.PutBack(it->first, it->second);
   }
+  // The picture can outlast the sound by far: Dune's main audio track ends
+  // 15 s before its film's video does, and CloseStream(video) below blocked
+  // with Player.Time standing still for all of it. Wait out the queued video
+  // packets here the same way. Packets only: the decoder's last pictures (~2 s
+  // behind its input) stay with CloseStream, so a still that repeats its
+  // last picture cannot keep this going.
+  if (drain && m_CurrentVideo.id >= 0)
+  {
+    const auto ceiling = std::chrono::steady_clock::now() + 30s;
+    auto lastProgress = std::chrono::steady_clock::now();
+    int lastLevel = m_VideoPlayerVideo->GetDataLevel();
+    double lastPts = m_VideoPlayerVideo->GetCurrentPts();
+    while (!m_bAbortRequest && m_VideoPlayerVideo->HasData() &&
+           std::chrono::steady_clock::now() < ceiling)
+    {
+      CThread::Sleep(100ms);
+      AdvancePlayTime();
+      const int level = m_VideoPlayerVideo->GetDataLevel();
+      const double pts = m_VideoPlayerVideo->GetCurrentPts();
+      const auto now = std::chrono::steady_clock::now();
+      if (level != lastLevel || pts != lastPts || m_clock.IsPaused())
+      {
+        lastProgress = now;
+        lastLevel = level;
+        lastPts = pts;
+      }
+      else if (now - lastProgress > 1500ms)
+        break;
+    }
+  }
   CloseStream(m_CurrentAudio, drain);
   CloseStream(m_CurrentVideo, drain);
 
