@@ -265,6 +265,36 @@ void CVideoPlayerVideo::CloseStream(bool bWaitForBuffers)
 
   m_messageQueue.End();
 
+  // Let the pictures already handed to the renderer present before the codec
+  // goes: deleting it releases their buffers, and the hardware decoder runs
+  // ~0.5 s ahead of the display. A drain with no audio left to wait out (an
+  // audio-less tail clip) closed video as soon as its packets were decoded,
+  // and Aniara's 1 s tail lost its last ~0.4 s, a 459-501 ms hole before the
+  // menu, every play. The thread is stopped, so nothing is added any more;
+  // bounded, and a paused clock (display mode change) does not count.
+  if (bWaitForBuffers && m_speed > 0)
+  {
+    auto lastProgress = std::chrono::steady_clock::now();
+    int lastQueued = -1;
+    while (true)
+    {
+      int late = 0, queued = 0, discard = 0;
+      double renderPts = 0;
+      m_renderManager.GetStats(late, renderPts, queued, discard);
+      if (queued <= 0)
+        break;
+      const auto now = std::chrono::steady_clock::now();
+      if (queued != lastQueued || m_pClock->IsPaused())
+      {
+        lastQueued = queued;
+        lastProgress = now;
+      }
+      else if (now - lastProgress > 1s)
+        break;
+      CThread::Sleep(10ms);
+    }
+  }
+
   CLog::Log(LOGINFO, "deleting video codec");
   m_pVideoCodec.reset();
 
