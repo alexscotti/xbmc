@@ -271,12 +271,15 @@ void CVideoPlayerVideo::CloseStream(bool bWaitForBuffers)
   // audio-less tail clip) closed video as soon as its packets were decoded,
   // and Aniara's 1 s tail lost its last ~0.4 s, a 459-501 ms hole before the
   // menu, every play. The thread is stopped, so nothing is added any more;
-  // bounded, and a paused clock (display mode change) does not count.
+  // bounded: 1 s without progress, a paused clock (display mode change) not
+  // counting - and 3 s in all, so a display that never comes back cannot hold
+  // the player thread here (nothing checks Stop on this path).
   if (bWaitForBuffers && m_speed > 0)
   {
+    const auto ceiling = std::chrono::steady_clock::now() + 3s;
     auto lastProgress = std::chrono::steady_clock::now();
     int lastQueued = -1;
-    while (true)
+    while (std::chrono::steady_clock::now() < ceiling)
     {
       int late = 0, queued = 0, discard = 0;
       double renderPts = 0;

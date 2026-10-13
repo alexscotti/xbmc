@@ -2041,9 +2041,10 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
   // The picture can outlast the sound by far: Dune's main audio track ends
   // 15 s before its film's video does, and CloseStream(video) below blocked
   // with Player.Time standing still for all of it. Wait out the queued video
-  // packets here the same way. Packets only: the decoder's last pictures (~2 s
-  // behind its input) stay with CloseStream, so a still that repeats its
-  // last picture cannot keep this going.
+  // data here the same way - HasData() counts the message queue and the
+  // decoder's input buffer, not pictures already decoded, so a still that
+  // repeats its last picture cannot keep this going; and it is bounded by the
+  // progress check and the ceiling besides.
   if (drain && m_CurrentVideo.id >= 0)
   {
     const auto ceiling = std::chrono::steady_clock::now() + 30s;
@@ -2770,7 +2771,10 @@ void CVideoPlayer::Process()
         // pictures) reaches this wait before its start sync, and a drain then
         // released the picture against the previous playlist's clock - 22 s
         // late, dropped - and the menu stayed black.
-        if (++m_inputRetryPolls >= 3 && m_inputDrainArmed && m_CurrentVideo.id >= 0 &&
+        // Blu-ray only: PVR and DVD inputs answer RETRY mid-stream while they
+        // wait for data, where a drain would flush a running decoder.
+        if (++m_inputRetryPolls >= 3 && m_inputDrainArmed && m_pInputBluray &&
+            m_CurrentVideo.id >= 0 &&
             m_CurrentVideo.syncState == IDVDStreamPlayer::SYNC_INSYNC)
         {
           m_inputDrainArmed = false;
@@ -6170,6 +6174,9 @@ bool CVideoPlayer::OpenVideoStream(CDVDStreamInfo& hint, bool reset)
       if ((field == unspecified && current == hd) || (field == hd && current == unspecified))
         field = current;
     };
+    // HD only: an SD clip that says nothing means BT.601
+    if (hint.height > 576 && m_CurrentVideo.hint.height > 576)
+    {
     sameOrDefault(cmp.colorSpace, m_CurrentVideo.hint.colorSpace, AVCOL_SPC_UNSPECIFIED,
                   AVCOL_SPC_BT709);
     sameOrDefault(cmp.colorRange, m_CurrentVideo.hint.colorRange, AVCOL_RANGE_UNSPECIFIED,
@@ -6178,6 +6185,7 @@ bool CVideoPlayer::OpenVideoStream(CDVDStreamInfo& hint, bool reset)
                   AVCOL_PRI_BT709);
     sameOrDefault(cmp.colorTransferCharacteristic, m_CurrentVideo.hint.colorTransferCharacteristic,
                   AVCOL_TRC_UNSPECIFIED, AVCOL_TRC_BT709);
+    }
     int compare = CDVDStreamInfo::COMPARE_ALL & ~CDVDStreamInfo::COMPARE_ID;
     if (m_bdStreamReuseVideoInband)
       compare &= ~CDVDStreamInfo::COMPARE_EXTRADATA;

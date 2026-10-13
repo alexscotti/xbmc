@@ -2530,12 +2530,19 @@ bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, bool isDualSt
         // seek (Babylon 2022, Bullet Train; the only two EL start discards and
         // the only two EL 4K setups in 1370 EL starts on record). On the base
         // layer it only cost video after the seek target.
+        // Live streams keep the discard: there a start backlog can be stale.
+        // The parameter is global, so set it either way on every open.
         CSysfsPath policy{"/sys/module/amvdec_h265/parameters/error_handle_policy"};
-        if (const auto value = policy.Get<int>(); value && !(*value & 0x200))
+        if (const auto value = policy.Get<int>())
         {
-          policy.Set(*value | 0x200);
-          CLog::Log(LOGINFO, "CAMLCodec::OpenDecoder - h265 error_handle_policy {:#x} -> {:#x} "
-                             "(no start-data discard)", *value, *value | 0x200);
+          const bool live = m_processInfo.IsRealtimeStream();
+          const int want = live ? (*value & ~0x200) : (*value | 0x200);
+          if (want != *value)
+          {
+            policy.Set(want);
+            CLog::Log(LOGINFO, "CAMLCodec::OpenDecoder - h265 error_handle_policy {:#x} -> {:#x} "
+                               "({} start-data discard)", *value, want, live ? "live:" : "no");
+          }
         }
       }
       break;
