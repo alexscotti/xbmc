@@ -308,6 +308,12 @@ unsigned CDVDMessageQueue::GetPacketCount(CDVDMsg::Message type)
   return count;
 }
 
+bool CDVDMessageQueue::HasPriorityMessage() const
+{
+  std::unique_lock lock(m_section);
+  return !m_prioMessages.empty();
+}
+
 void CDVDMessageQueue::WaitUntilEmpty(const std::function<bool()>& consumerHeld)
 {
   {

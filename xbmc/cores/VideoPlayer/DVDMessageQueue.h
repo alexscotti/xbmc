@@ -78,6 +78,7 @@ public:
   double GetTimeSize() const;
   unsigned GetPacketCount(CDVDMsg::Message type);
   bool ReceivedAbortRequest() { return m_bAbortRequest; }
+  bool HasPriorityMessage() const;
   void WaitUntilEmpty(const std::function<bool()>& consumerHeld = {});
 
   // non messagequeue related functions

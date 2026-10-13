@@ -597,13 +597,24 @@ void CVideoPlayerVideo::Process()
       // segment's last ~2 s came out in bursts of 9 every ~420 ms - more
       // than the render queue covers: late frames dropped, gaps of 209-459 ms
       // growing to the end (Memento's title end, kernel presentation trace).
-      // Bounded: a decoder that never reports EOF costs 3 s here, no more.
-      const auto drainEnd = std::chrono::steady_clock::now() + 3s;
-      while (!m_bStop && m_pVideoCodec && !m_messageQueue.ReceivedAbortRequest())
+      // Bounded by progress, not wall time: the drain queued at a segment's
+      // end waits behind its last packet, and the decoder may then still
+      // hold seconds of pictures it releases at their presentation pace
+      // (Comin' at Ya!'s title end: 9.4 s). A fixed 3 s bound gave up
+      // half-way and the rest came out in the bursts above - pauses of
+      // 250-334 ms over the film's last 4.5 s. A decoder that never reports
+      // EOF costs 3 s without a picture, no more. A priority message (pause,
+      // flush, speed, sync) ends the drain so it never holds a user action.
+      auto drainEnd = std::chrono::steady_clock::now() + 3s;
+      while (!m_bStop && m_pVideoCodec && !m_messageQueue.ReceivedAbortRequest() &&
+             !m_messageQueue.HasPriorityMessage())
       {
         m_pVideoCodec->SetCodecControl(DVD_CODEC_CTRL_DRAIN);
         if (ProcessDecoderOutput(frametime, pts))
+        {
+          drainEnd = std::chrono::steady_clock::now() + 3s;
           continue;
+        }
         if (m_lastDecoderState != CDVDVideoCodec::VC_BUFFER ||
             std::chrono::steady_clock::now() > drainEnd)
           break;
