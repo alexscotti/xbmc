@@ -2518,6 +2518,26 @@ bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, bool isDualSt
         CSysfsPath("/sys/module/amvdec_h265/parameters/nal_skip_policy", 1);
       else
         CSysfsPath("/sys/module/amvdec_h265/parameters/nal_skip_policy", 2);
+      {
+        // Never let the decoder skip the start of its input. With bit 0x200
+        // clear, vh265's check_dirty_data() jumps past most of a start
+        // backlog over 1 MB - stale-data handling meant for broadcast. After
+        // a seek the backlog is all valid: the Dolby Vision enhancement-layer
+        // instance, starting behind the base layer, lost its sequence headers
+        // that way, set up at the 4K hint size, then met its 1080p SPS - and
+        // the resolution change on the DV slave left it re-raising "output
+        // first frame" from the interrupt forever: the decoder wedge after a
+        // seek (Babylon 2022, Bullet Train; the only two EL start discards and
+        // the only two EL 4K setups in 1370 EL starts on record). On the base
+        // layer it only cost video after the seek target.
+        CSysfsPath policy{"/sys/module/amvdec_h265/parameters/error_handle_policy"};
+        if (const auto value = policy.Get<int>(); value && !(*value & 0x200))
+        {
+          policy.Set(*value | 0x200);
+          CLog::Log(LOGINFO, "CAMLCodec::OpenDecoder - h265 error_handle_policy {:#x} -> {:#x} "
+                             "(no start-data discard)", *value, *value | 0x200);
+        }
+      }
       break;
     case VFORMAT_H266:
       am_private->gcodec.format = VIDEO_DEC_FORMAT_H266;
