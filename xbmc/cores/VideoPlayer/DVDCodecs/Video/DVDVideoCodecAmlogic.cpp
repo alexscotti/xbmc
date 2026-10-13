@@ -56,6 +56,45 @@ constexpr double DL_PAIR_DTS_TOLERANCE = 10000.0;
 // 00801.mpls). Comfortably above any real skew, far below any real restart.
 constexpr double DL_STALE_QUEUE_LEAD = 2.0 * DVD_TIME_BASE;
 
+// Whether one HEVC access unit holds an IRAP picture (BLA/IDR/CRA, NAL types
+// 16-21). nalLengthSize is 0 for Annex-B input, as for AMLLatchHevcDoviRpu.
+bool HevcAuIsIrap(const uint8_t* data, size_t size, int nalLengthSize)
+{
+  const auto irap = [](uint8_t header) {
+    const int type = (header >> 1) & 0x3f;
+    return type >= 16 && type <= 21;
+  };
+  if (!data || size < 4)
+    return false;
+  if (nalLengthSize >= 1 && nalLengthSize <= 4)
+  {
+    size_t pos = 0;
+    while (pos + nalLengthSize < size)
+    {
+      uint32_t len = 0;
+      for (int i = 0; i < nalLengthSize; ++i)
+        len = (len << 8) | data[pos + i];
+      pos += nalLengthSize;
+      if (len == 0 || len > size - pos)
+        return false;
+      if (irap(data[pos]))
+        return true;
+      pos += len;
+    }
+    return false;
+  }
+  for (size_t i = 0; i + 3 < size; ++i)
+  {
+    if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
+    {
+      if (irap(data[i + 3]))
+        return true;
+      i += 2;
+    }
+  }
+  return false;
+}
+
 // The presentation time of a BL+EL pair. Both layers of a frame carry one dts
 // and one pts, but a disc can get the BL's pts wrong: Donnie Darko's BL PES
 // give every B-frame of a mini-GOP its P-frame's pts (221980312 three times
@@ -1005,6 +1044,29 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
               packet.isELPackage ? "EL" : "BL", pairDts/DVD_TIME_BASE,
               isELPackageBackup ? "EL" : "BL", demuxDtsBackup/DVD_TIME_BASE);
             return true;
+          }
+
+          // A base-layer keyframe without a demuxer dts cannot be told from
+          // the stale enhancement-layer packets queued ahead of it, and used to
+          // pair with the oldest one. After a seek the demuxer delivers two or
+          // three EL packets before the BL keyframe; with timestamps they are
+          // older and dropped above, and the keyframe pairs with its own EL
+          // keyframe. When ffmpeg gave that keyframe no dts (Bullet Train,
+          // 2026-10-12) it paired with a 906-byte EL TRAIL picture carrying no
+          // VPS/SPS: the EL decoder instance stalled looking for one, the
+          // driver discarded its start backlog, set it up at the base layer's
+          // 4K, and its 1080p SPS then wedged the decoder. A keyframe's partner
+          // is a keyframe, so a queued non-keyframe EL ahead of it is stale.
+          if (!dtsKnown && !packet.isELPackage && isELPackageBackup &&
+              m_hints.codec == AV_CODEC_ID_HEVC &&
+              HevcAuIsIrap(pData, iSize, m_nalLengthSize) &&
+              !HevcAuIsIrap(pDataBackup, iSizeBackup, m_nalLengthSize))
+          {
+            CLog::Log(LOGINFO, "CDVDVideoCodecAmlogic::{}: base-layer keyframe without a dts - "
+                               "dropping queued non-keyframe EL package (demux dts {:.3f})",
+                      __FUNCTION__, demuxDtsBackup / DVD_TIME_BASE);
+            PopPackageFront();
+            continue;
           }
 
           if (!packet.isELPackage)
