@@ -5,6 +5,7 @@
  *  See LICENSES/README.md for more information.
  */
 
+#include <atomic>
 #include <chrono>
 #include <gbm.h>
 #include <xf86drm.h>
@@ -210,6 +211,9 @@ private:
   // when frame-packed 3D was last left; every mode set shortly after it
   // sets the HDMI phy up again (see set_native_resolution)
   std::chrono::steady_clock::time_point m_left_3d_at{};
+  // bumped by every mode set; the delayed phy setup after leaving 3D runs
+  // only if no mode set came after the one that scheduled it
+  std::shared_ptr<std::atomic<unsigned>> m_mode_set_gen{std::make_shared<std::atomic<unsigned>>(0)};
   CHDRCapabilities m_hdr_caps;
   bool m_is_widescreen = false;
   bool m_support_3d = false;

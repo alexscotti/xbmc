@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 #include <amcodec/codec.h>
 #include <chrono>
+#include <thread>
 
 #include "AMLDisplay.h"
 #include "filesystem/SpecialProtocol.h"
@@ -1211,12 +1212,26 @@ bool CAMLDisplay::set_native_resolution(const RESOLUTION_INFO &res, std::string 
     if (stereo_mode == RenderStereoMode::HARDWAREBASED ||
         stereo_mode == RenderStereoMode::OFF)
       handle_display_stereo_mode(stereo_mode);
+    const unsigned gen = ++(*m_mode_set_gen);
     result = set_display_resolution(res, framebuffer_name, force_mode_switch, hotplug_mode_switch);
     if (after_3d && stereo_mode == RenderStereoMode::OFF)
     {
       CLog::Log(LOGINFO, "CAMLDisplay::{}: mode set {} after leaving 3D - setting the HDMI phy up again",
                 __FUNCTION__, res.strId);
       CSysfsPath("/sys/class/amhdmitx/amhdmitx0/phy", 1);
+      // Done right after the last mode set this did not always recover the
+      // link (Avatar 3D Atmos and Alice in Wonderland 3D, build 43): the
+      // same write by hand 15 s or a minute later always did. So set the
+      // phy up once more 3 s after the LAST mode set out of 3D - a later
+      // mode set (gen moved on) takes over.
+      auto gen_now = m_mode_set_gen;
+      std::thread([gen_now, gen, id = res.strId] {
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        if (gen_now->load() != gen)
+          return;
+        CLog::Log(LOGINFO, "CAMLDisplay: 3 s after mode set {} out of 3D - setting the HDMI phy up again", id);
+        CSysfsPath("/sys/class/amhdmitx/amhdmitx0/phy", 1);
+      }).detach();
     }
     if (stereo_mode != RenderStereoMode::HARDWAREBASED &&
         stereo_mode != RenderStereoMode::OFF)
