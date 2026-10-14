@@ -799,6 +799,10 @@ protected:
   uint32_t m_timelineRestartSeq = 0;
   bool m_timelineRestartStamped = false;
 
+  // A video packet with a timestamp has arrived since the last flush / stream
+  // open; until then untimed Blu-ray packets are old-position fragments.
+  bool m_videoStampSinceFlush = false;
+
   bool m_updateStreamDetails{false};
 
   std::atomic<bool> m_displayLost;

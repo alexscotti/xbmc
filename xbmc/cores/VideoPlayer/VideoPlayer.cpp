@@ -2995,6 +2995,28 @@ void CVideoPlayer::ProcessVideoData(CDemuxStream* pStream, DemuxPacket* pPacket)
   if (checkcont && (m_CurrentVideo.avsync == CCurrentStream::AV_SYNC_CHECK))
     m_CurrentVideo.avsync = CCurrentStream::AV_SYNC_NONE;
 
+  // After a Blu-ray time seek the mpegts demuxer still holds the PES it was
+  // assembling at the old position (a libbluray seek does not move the AVIO
+  // position, so it never sees the seek), and the first video packet out is
+  // that fragment - through the HEVC parser it loses the corrupt flag the
+  // demuxer drop keys on, and it carries no timestamp at all. Decoded, it came
+  // out as a pts-0 picture that became the video start time: Seven Samurai,
+  // seek to 2860s, clock started at 0 and the picture never moved. Until a
+  // stream has delivered a timestamped packet since the flush, a packet with
+  // neither dts nor pts can only be such a fragment: drop it unseen.
+  if (pPacket->dts != DVD_NOPTS_VALUE || pPacket->pts != DVD_NOPTS_VALUE)
+    m_videoStampSinceFlush = true;
+  else if (!m_videoStampSinceFlush && pPacket->iSize != 4 && m_pInputStream &&
+           m_pInputStream->IsStreamType(DVDSTREAM_TYPE_BLURAY))
+  {
+    CLog::Log(LOGDEBUG,
+              "CVideoPlayer::ProcessVideoData - dropping untimed packet ({} bytes) before the "
+              "first timestamp since the flush",
+              pPacket->iSize);
+    CDVDDemuxUtils::FreeDemuxPacket(pPacket);
+    return;
+  }
+
   bool drop = false;
   if (CheckPlayerInit(m_CurrentVideo))
     drop = true;
@@ -6555,6 +6577,7 @@ void CVideoPlayer::FlushBuffers(double pts, bool accurate, bool sync)
     // stamp on the next genuine boundary
     m_menuWrapVideoGap = 0.0;
     m_timelineRestartStamped = false;
+    m_videoStampSinceFlush = false;
   }
 
   // stamps taken before the flush reference a dead timeline: snap the
