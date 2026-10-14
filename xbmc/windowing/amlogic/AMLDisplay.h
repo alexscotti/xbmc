@@ -5,6 +5,7 @@
  *  See LICENSES/README.md for more information.
  */
 
+#include <chrono>
 #include <gbm.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -206,6 +207,9 @@ private:
   bool aml_mode_to_resolution(const char *mode, RESOLUTION_INFO *res);
   bool m_bHotPlug = false;
   RenderStereoMode m_stereo_mode;
+  // when frame-packed 3D was last left; every mode set shortly after it
+  // sets the HDMI phy up again (see set_native_resolution)
+  std::chrono::steady_clock::time_point m_left_3d_at{};
   CHDRCapabilities m_hdr_caps;
   bool m_is_widescreen = false;
   bool m_support_3d = false;

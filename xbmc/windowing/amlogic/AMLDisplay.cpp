@@ -9,7 +9,6 @@
 #include <sys/ioctl.h>
 #include <amcodec/codec.h>
 #include <chrono>
-#include <thread>
 
 #include "AMLDisplay.h"
 #include "filesystem/SpecialProtocol.h"
@@ -1191,35 +1190,32 @@ bool CAMLDisplay::set_native_resolution(const RESOLUTION_INFO &res, std::string 
   }
   else
   {
-    // Leaving frame packing: the kernel applies "3doff" asynchronously, and a
-    // resolution change that lands first is set as a FRAME-PACKED mode. On an
-    // AM9 Pro (S6), stopping a 3D film set 2160p24 while still in 3dfp
-    // (vout 3840x4410, 8 bit "because of 3dfp mode" - twice HDMI 2.0's
-    // bandwidth), then took 3doff and set 2160p24 again; the transmitter
-    // reported its phy enabled but sent nothing - the HDFury saw no signal
-    // and the screen stayed black until the phy was set up again by hand.
-    // So wait for the kernel to report 3D off before the resolution change
-    // (bounded), and set the phy up again after it.
-    const bool leaving_3d = m_stereo_mode != RenderStereoMode::OFF &&
-                            m_stereo_mode != RenderStereoMode::UNDEFINED &&
-                            stereo_mode == RenderStereoMode::OFF;
+    // Leaving frame packing can leave the HDMI transmitter sending nothing.
+    // On an AM9 Pro (S6), stopping a 3D film changes mode two or three times
+    // within ~250 ms (2160p24 still in 3dfp - the kernel applies "3doff"
+    // asynchronously - then 2160p24 10 bit, then the GUI's 1080p24); the
+    // transmitter logs its phy enabled each time, but after the last change
+    // the HDFury saw no signal (tx0tmds 0) and the screen stayed black until
+    // /sys/class/amhdmitx/amhdmitx0/phy was written by hand, which brought
+    // the picture straight back - twice, by hand. Writing it once after the
+    // first change was not enough (Avatar: The Way of Water 3D, 1 in 23):
+    // the next change came 60 ms later and the link was lost again. So for
+    // every mode set within 10 s of leaving 3D, set the phy up again after
+    // it - each one is then followed by a fresh phy setup.
+    if (m_stereo_mode != RenderStereoMode::OFF && m_stereo_mode != RenderStereoMode::UNDEFINED &&
+        stereo_mode == RenderStereoMode::OFF)
+      m_left_3d_at = std::chrono::steady_clock::now();
+    const bool after_3d =
+        m_left_3d_at != std::chrono::steady_clock::time_point{} &&
+        std::chrono::steady_clock::now() - m_left_3d_at < std::chrono::seconds(10);
     if (stereo_mode == RenderStereoMode::HARDWAREBASED ||
         stereo_mode == RenderStereoMode::OFF)
       handle_display_stereo_mode(stereo_mode);
-    if (leaving_3d)
-    {
-      CSysfsPath kernel_stereo_mode{"/sys/class/amhdmitx/amhdmitx0/stereo_mode"};
-      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-      while (kernel_stereo_mode.Exists() && kernel_stereo_mode.Get<int>().value_or(0) != 0 &&
-             std::chrono::steady_clock::now() < deadline)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      CLog::Log(LOGDEBUG, "CAMLDisplay::{}: leaving 3D - kernel stereo_mode {} before the mode set",
-                __FUNCTION__, kernel_stereo_mode.Exists() ? kernel_stereo_mode.Get<int>().value_or(-1) : -1);
-    }
     result = set_display_resolution(res, framebuffer_name, force_mode_switch, hotplug_mode_switch);
-    if (leaving_3d)
+    if (after_3d && stereo_mode == RenderStereoMode::OFF)
     {
-      CLog::Log(LOGINFO, "CAMLDisplay::{}: left 3D - setting the HDMI phy up again", __FUNCTION__);
+      CLog::Log(LOGINFO, "CAMLDisplay::{}: mode set {} after leaving 3D - setting the HDMI phy up again",
+                __FUNCTION__, res.strId);
       CSysfsPath("/sys/class/amhdmitx/amhdmitx0/phy", 1);
     }
     if (stereo_mode != RenderStereoMode::HARDWAREBASED &&
