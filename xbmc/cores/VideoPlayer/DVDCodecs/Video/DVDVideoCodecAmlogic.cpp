@@ -1068,6 +1068,24 @@ bool CDVDVideoCodecAmlogic::AddData(const DemuxPacket &packet)
             PopPackageFront();
             continue;
           }
+          // The other arrival order: the keyframe is already queued and the
+          // EL arrives after it. Billy Madison, 2026-10-13: after a seek the
+          // stale and early ELs were dropped by the rule above, then the next
+          // EL - 399.816, a non-keyframe - arrived and paired with the queued
+          // dts-less keyframe; its real partner (399.858) came one packet
+          // later and was dropped as unpaired. The EL instance started on a
+          // trailing picture, came up at the base layer's 4K and its flush
+          // looped in the driver (the box hung until power cycled).
+          if (!dtsKnown && packet.isELPackage && !isELPackageBackup &&
+              m_hints.codec == AV_CODEC_ID_HEVC &&
+              HevcAuIsIrap(pDataBackup, iSizeBackup, m_nalLengthSize) &&
+              !HevcAuIsIrap(pData, iSize, m_nalLengthSize))
+          {
+            CLog::Log(LOGINFO, "CDVDVideoCodecAmlogic::{}: base-layer keyframe without a dts - "
+                               "dropping incoming non-keyframe EL package (demux dts {:.3f})",
+                      __FUNCTION__, pairDts / DVD_TIME_BASE);
+            return true;
+          }
 
           if (!packet.isELPackage)
           {
