@@ -377,7 +377,7 @@ namespace XBMCAddon
       if (!getAppPlayer()->IsPlaying())
         throw PlayerException("Kodi is not playing any file");
 
-      return g_application.CurrentFileItem().GetDynPath();
+      return g_application.CurrentFileItemCopy().GetDynPath();
     }
 
     XBMCAddon::xbmcgui::ListItem* Player::getPlayingItem()
@@ -386,7 +386,7 @@ namespace XBMCAddon
       if (!getAppPlayer()->IsPlaying())
         throw PlayerException("Kodi is not playing any item");
 
-      CFileItemPtr itemPtr = std::make_shared<CFileItem>(g_application.CurrentFileItem());
+      CFileItemPtr itemPtr = std::make_shared<CFileItem>(g_application.CurrentFileItemCopy());
       return new XBMCAddon::xbmcgui::ListItem(itemPtr);
     }
 

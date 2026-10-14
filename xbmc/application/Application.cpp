@@ -1644,7 +1644,10 @@ void CApplication::FrameMove(bool processEvents, bool processGUI)
 
 void CApplication::ResetCurrentItem()
 {
-  m_itemCurrentFile = std::make_unique<CFileItem>();
+  {
+    std::unique_lock lock(m_currentItemSection);
+    m_itemCurrentFile = std::make_unique<CFileItem>();
+  }
   if (m_pGUI)
     m_pGUI->GetInfoManager().ResetCurrentItem();
 }
@@ -2590,7 +2593,14 @@ const std::string& CApplication::CurrentFile()
 
 std::shared_ptr<CFileItem> CApplication::CurrentFileItemPtr()
 {
+  std::unique_lock lock(m_currentItemSection);
   return m_itemCurrentFile;
+}
+
+CFileItem CApplication::CurrentFileItemCopy() const
+{
+  std::unique_lock lock(m_currentItemSection);
+  return *m_itemCurrentFile;
 }
 
 CFileItem& CApplication::CurrentFileItem()

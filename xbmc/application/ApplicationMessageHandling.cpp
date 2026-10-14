@@ -66,6 +66,7 @@
 #include "windowing/WinSystem.h"
 
 #include <memory>
+#include <mutex>
 
 #ifdef TARGET_ANDROID
 #include "platform/android/activity/XBMCApp.h"
@@ -407,7 +408,10 @@ void CApplicationMessageHandling::OnApplicationMessage(MESSAGING::ThreadMessage*
       std::unique_ptr<CFileItem> item{static_cast<CFileItem*>(pMsg->lpVoid)};
       if (item)
       {
-        m_app.CurrentFileItem().UpdateInfo(*item);
+        {
+          std::unique_lock lock(m_app.m_currentItemSection);
+          m_app.CurrentFileItem().UpdateInfo(*item);
+        }
         CServiceBroker::GetGUI()->GetInfoManager().UpdateCurrentItem(m_app.CurrentFileItem());
         pMsg->SetResult(0);
       }
@@ -492,7 +496,10 @@ bool CApplicationMessageHandling::OnMessage(const CGUIMessage& message)
         CFileItemPtr item = std::static_pointer_cast<CFileItem>(message.GetItem());
         if (m_app.CurrentFileItem().IsSamePath(item.get()))
         {
-          m_app.CurrentFileItem().UpdateInfo(*item);
+          {
+            std::unique_lock lock(m_app.m_currentItemSection);
+            m_app.CurrentFileItem().UpdateInfo(*item);
+          }
           CServiceBroker::GetGUI()->GetInfoManager().UpdateCurrentItem(*item);
         }
       }

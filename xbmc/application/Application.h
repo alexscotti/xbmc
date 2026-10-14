@@ -24,6 +24,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -116,6 +117,11 @@ public:
   const std::string& CurrentFile();
   CFileItem& CurrentFileItem();
   std::shared_ptr<CFileItem> CurrentFileItemPtr();
+  //! A copy of the current item, taken under the lock its writers hold. For
+  //! callers off the application thread (JSON-RPC, Python): copying through
+  //! CurrentFileItem() raced the item's replacement at playback start and
+  //! read freed memory.
+  CFileItem CurrentFileItemCopy() const;
   const CFileItem& CurrentUnstackedItem();
   bool OnMessage(CGUIMessage& message) override;
   std::string GetCurrentPlayer();
@@ -201,7 +207,11 @@ protected:
   bool OnSettingsSaving() const override;
   void PlaybackCleanup();
 
-  void SetCurrentFileItem(std::shared_ptr<CFileItem> item) { m_itemCurrentFile = std::move(item); }
+  void SetCurrentFileItem(std::shared_ptr<CFileItem> item)
+  {
+    std::unique_lock lock(m_currentItemSection);
+    m_itemCurrentFile = std::move(item);
+  }
 
   void ResetPlayerEvent() { m_playerEvent.Reset(); }
 
@@ -242,6 +252,9 @@ private:
   void ResetCurrentItem();
 
   mutable CCriticalSection m_critSection; /*!< critical section for all changes to this class, except for changes to triggers */
+  /*! guards m_itemCurrentFile: its replacement at playback start, its in-place
+   *  UpdateInfo, and the copies other threads take (CurrentFileItemCopy) */
+  mutable CCriticalSection m_currentItemSection;
 
   CCriticalSection m_frameMoveGuard;              /*!< critical section for synchronizing GUI actions from inside and outside (python) */
   std::atomic_uint m_WaitingExternalCalls;        /*!< counts threads which are waiting to be processed in FrameMove */

@@ -225,7 +225,10 @@ JSONRPC_STATUS CPlayerOperations::GetItem(const std::string &method, ITransportL
     case Video:
     case Audio:
     {
-      fileItem = std::make_shared<CFileItem>(g_application.CurrentFileItem());
+      // a copy under the item's lock: copying through CurrentFileItem() raced
+      // its replacement at playback start and crashed Kodi (SIGSEGV in the
+      // CFileItem copy, a title opened while Player.GetItem was answered)
+      fileItem = std::make_shared<CFileItem>(g_application.CurrentFileItemCopy());
       if (IsPVRChannel())
       {
         // Metadata that arrives mid-stream reaches only the item held by the GUI, so overlay
