@@ -3546,7 +3546,30 @@ void CVideoPlayer::HandlePlaySpeed()
         else
           clock = m_CurrentAudio.starttime - m_CurrentAudio.cachetime;
 
-        if (m_CurrentVideo.starttime != DVD_NOPTS_VALUE && (m_CurrentVideo.packets > 0))
+        // Video starting further ahead of audio than the audio queue can ever
+        // hold is not an interleave offset: the audio start came from data
+        // that does not belong to this position. Seen after a seek while the
+        // NAS was unreachable (The Omen 2006, seek to 1155.8s): 34 DTS
+        // packets stamped 58.8-59.6s were demuxed first, the rule below then
+        // held the clock at the audio start, and the video at 1155.4s waited
+        // ~1096s for it - a frozen picture for 18 minutes. Start from the
+        // video instead; the stale audio is far behind that clock and is
+        // dropped as late.
+        const double maxInterleave =
+            DVD_SEC_TO_TIME(m_messageQueueTimeSize) + DVD_MSEC_TO_TIME(2000);
+        if (m_CurrentVideo.starttime != DVD_NOPTS_VALUE && m_CurrentVideo.packets > 0 &&
+            !m_pInputStream->IsRealtime() &&
+            m_CurrentVideo.starttime - m_CurrentAudio.starttime > maxInterleave)
+        {
+          CLog::Log(LOGWARNING,
+                    "VideoPlayer::Sync - audio start {:.3f}s is {:.1f}s behind video start "
+                    "{:.3f}s (beyond any interleave): stale audio, clock starts from video",
+                    m_CurrentAudio.starttime / DVD_TIME_BASE,
+                    (m_CurrentVideo.starttime - m_CurrentAudio.starttime) / DVD_TIME_BASE,
+                    m_CurrentVideo.starttime / DVD_TIME_BASE);
+          clock = m_CurrentVideo.starttime - m_CurrentVideo.cachetotal;
+        }
+        else if (m_CurrentVideo.starttime != DVD_NOPTS_VALUE && (m_CurrentVideo.packets > 0))
         {
           if (m_CurrentVideo.starttime - m_CurrentVideo.cachetotal < clock)
           {
