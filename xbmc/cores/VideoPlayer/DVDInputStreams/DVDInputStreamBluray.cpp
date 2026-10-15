@@ -186,6 +186,45 @@ CDVDInputStreamBluray::~CDVDInputStreamBluray()
   Close();
 }
 
+void CDVDInputStreamBluray::PublishChainHint(unsigned int playItem)
+{
+  if (!m_fileSession || !m_fileSession->cache)
+    return;
+  if (!m_titleInfo || playItem >= m_titleInfo->clip_count)
+    return;
+
+  // The clip of this playitem, and the clip of the next one. Both come out of
+  // the playlist libbluray is actually playing, so this is exact rather than
+  // the "newest mpls that contains this clip" guess the NAS side has to make.
+  // A seamless connection is no different here: connection_condition changes
+  // how the transition is presented, not which file comes next.
+  const auto clipPath = [this](unsigned int index) -> std::string {
+    const BLURAY_CLIP_INFO& clip = m_titleInfo->clips[index];
+    const size_t len = strnlen(clip.clip_id, sizeof(clip.clip_id));
+    if (len == 0)
+      return {};
+    return URIUtils::AddFileToFolder(m_rootPath, "BDMV/STREAM",
+                                     std::string(clip.clip_id, len) + ".m2ts");
+  };
+
+  const std::string current = clipPath(playItem);
+  if (current.empty())
+    return;
+
+  std::string next;
+  if (playItem + 1 < m_titleInfo->clip_count)
+  {
+    next = clipPath(playItem + 1);
+    // One clip, many playitems - Gangs of New York's 00012.mpls, M3GAN 2.0's
+    // 28 items. The next read is then a seek inside a file that is already
+    // open and cached, so there is nothing to prime.
+    if (next == current)
+      next.clear();
+  }
+
+  m_fileSession->cache->SetChainHint(current, next);
+}
+
 void CDVDInputStreamBluray::Abort()
 {
   m_hold = HOLD_EXIT;
@@ -1324,6 +1363,8 @@ void CDVDInputStreamBluray::ProcessEvent() {
 
       m_playlist = m_event.param;
       ProcessItem(m_playlist);
+      // A new playlist: the old hint named clips of the old one.
+      PublishChainHint(0);
 
       if (carry)
       {
@@ -1398,6 +1439,9 @@ void CDVDInputStreamBluray::ProcessEvent() {
       m_clip = &m_titleInfo->clips[m_event.param];
       m_playItem = m_event.param;
       UpdateClipInfo(m_event.param);
+      // Republished on every playitem, so a prime taken for the clip that
+      // used to be next is dropped rather than adopted.
+      PublishChainHint(m_event.param);
     }
     // Outside the braces on purpose: this must also run when FreeTitleInfo has
     // nulled m_clip and no PLAYITEM follows (angle re-announce mid-playitem),

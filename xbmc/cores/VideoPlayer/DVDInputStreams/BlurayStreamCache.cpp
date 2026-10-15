@@ -33,6 +33,15 @@ int64_t NowMs()
       .count();
 }
 
+// Just the file name, for logs. Deliberately not URIUtils: everything in this
+// file is kept free of the rest of Kodi so the class can be tested against a
+// fake source with no Kodi around it.
+std::string NameOf(const std::string& path)
+{
+  const size_t slash = path.find_last_of('/');
+  return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
 std::string WorkKey(const std::string& path, int64_t pageIndex)
 {
   return path + ':' + std::to_string(pageIndex);
@@ -146,6 +155,7 @@ CBlurayStreamCache::~CBlurayStreamCache()
     std::unique_lock<std::mutex> lock(m_queueMutex);
     m_stopWorker = true;
     m_window.clear();
+    m_primes.clear();
     m_queued.clear();
 
     if (m_workerCtx && m_workerCtx->readStartMs.load() != 0 && m_abandoned < m_config.abandonMax)
@@ -189,6 +199,7 @@ void CBlurayStreamCache::Abort()
   {
     std::lock_guard<std::mutex> lock(m_queueMutex);
     m_window.clear();
+    m_primes.clear();
     m_queued.clear();
     if (m_workerCtx)
       m_workerCtx->cancel.store(true);
@@ -210,6 +221,15 @@ std::shared_ptr<CBlurayStreamCache::CView> CBlurayStreamCache::OpenFile(const st
     auto it = m_files.find(path);
     if (it != m_files.end())
       length = it->second->length;
+  }
+
+  if (length != 0)
+  {
+    // Already known, which means a prime has been here: its head is resident
+    // and nothing has to be opened. THIS is the adoption - the blocking
+    // CFile::Open at a clip boundary simply does not happen.
+    std::lock_guard<std::mutex> lock(m_statsMutex);
+    ++m_stats.primesAdopted;
   }
 
   if (length == 0)
@@ -243,6 +263,76 @@ std::shared_ptr<CBlurayStreamCache::FileState> CBlurayStreamCache::GetFileUnlock
   file->path = path;
   m_files.emplace(path, file);
   return file;
+}
+
+void CBlurayStreamCache::SetChainHint(const std::string& currentPath,
+                                     const std::string& nextPath)
+{
+  std::string dropped;
+  {
+    std::lock_guard<std::mutex> lock(m_hintMutex);
+    if (m_hintCurrent == currentPath && m_hintNext == nextPath)
+      return;
+
+    // A prime taken for a clip that is no longer next cannot be adopted, so
+    // stop holding it: its pages are already at the cold end of the LRU and
+    // will go first.
+    if (!m_primeQueuedFor.empty() && m_primeQueuedFor != nextPath)
+    {
+      dropped = m_primeQueuedFor;
+      m_primeQueuedFor.clear();
+    }
+    m_hintCurrent = currentPath;
+    m_hintNext = nextPath;
+  }
+
+  if (!dropped.empty())
+  {
+    {
+      std::lock_guard<std::mutex> lock(m_queueMutex);
+      m_primes.erase(std::remove(m_primes.begin(), m_primes.end(), dropped), m_primes.end());
+    }
+    std::lock_guard<std::mutex> lock(m_statsMutex);
+    ++m_stats.primesDropped;
+  }
+
+  CLog::Log(LOGDEBUG, "CBlurayStreamCache - chain hint: {} -> {}",
+            NameOf(currentPath),
+            nextPath.empty() ? "(end of playlist)" : NameOf(nextPath));
+}
+
+void CBlurayStreamCache::MaybeQueuePrime(const std::shared_ptr<FileState>& file, int64_t offset)
+{
+  if (m_config.nextLeadBytes == 0 || m_config.nextSizeBytes == 0)
+    return;
+  if (file->length <= 0 || (file->length - offset) > static_cast<int64_t>(m_config.nextLeadBytes))
+    return;
+
+  std::string next;
+  {
+    std::lock_guard<std::mutex> lock(m_hintMutex);
+    if (m_hintCurrent != file->path || m_hintNext.empty())
+      return;
+    if (m_primeQueuedFor == m_hintNext)
+      return; // already queued or done
+    next = m_hintNext;
+    m_primeQueuedFor = next;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    if (m_stopWorker || m_aborted)
+      return;
+    m_primes.push_back(next);
+  }
+  {
+    std::lock_guard<std::mutex> lock(m_statsMutex);
+    ++m_stats.primesStarted;
+  }
+  m_queueChanged.notify_one();
+  CLog::Log(LOGDEBUG, "CBlurayStreamCache - priming {} ({} MB) - {} MB left of {}",
+            NameOf(next), m_config.nextSizeBytes / (1024 * 1024),
+            (file->length - offset) / (1024 * 1024), NameOf(file->path));
 }
 
 int64_t CBlurayStreamCache::ReadAt(const std::string& path,
@@ -432,6 +522,7 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
   }
 
   QueueForwardWindow(file, lastPage);
+  MaybeQueuePrime(file, offset + static_cast<int64_t>(done));
   MaybeLogStats();
   return static_cast<int64_t>(done);
 }
@@ -468,7 +559,8 @@ size_t CBlurayStreamCache::CopyFromPageUnlocked(FileState& file,
 void CBlurayStreamCache::InsertPageUnlocked(const std::shared_ptr<FileState>& file,
                                             int64_t pageIndex,
                                             const uint8_t* data,
-                                            size_t validBytes)
+                                            size_t validBytes,
+                                            bool prime)
 {
   auto existing = file->pages.find(pageIndex);
   if (existing != file->pages.end())
@@ -484,8 +576,16 @@ void CBlurayStreamCache::InsertPageUnlocked(const std::shared_ptr<FileState>& fi
     return;
 
   std::memcpy(page, data, validBytes);
-  m_lru.push_front({file.get(), pageIndex});
-  file->pages.emplace(pageIndex, Resident{page, validBytes, m_lru.begin()});
+  if (prime)
+  {
+    m_lru.push_back({file.get(), pageIndex});
+    file->pages.emplace(pageIndex, Resident{page, validBytes, std::prev(m_lru.end())});
+  }
+  else
+  {
+    m_lru.push_front({file.get(), pageIndex});
+    file->pages.emplace(pageIndex, Resident{page, validBytes, m_lru.begin()});
+  }
 }
 
 void CBlurayStreamCache::TouchPageUnlocked(FileState& file, int64_t pageIndex)
@@ -698,10 +798,22 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
   {
     std::unique_lock<std::mutex> lock(m_queueMutex);
     m_queueChanged.wait(lock, [&] {
-      return m_stopWorker || ctx.cancel.load() || m_workerCtx.get() != &ctx || !m_window.empty();
+      return m_stopWorker || ctx.cancel.load() || m_workerCtx.get() != &ctx || !m_window.empty() ||
+             !m_primes.empty();
     });
     if (m_stopWorker || ctx.cancel.load() || m_workerCtx.get() != &ctx)
       return false;
+
+    // Window before prime, always: the clip being watched must not starve so
+    // the next one can be got ready.
+    if (m_window.empty())
+    {
+      const std::string prime = m_primes.front();
+      m_primes.pop_front();
+      lock.unlock();
+      RunPrime(ctx, prime);
+      return true;
+    }
 
     work = m_window.front();
     m_window.pop_front();
@@ -771,6 +883,85 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
   }
   m_pageChanged.notify_all();
   return true;
+}
+
+void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const std::string& path)
+{
+  ISource* source = GetWorkerSource(ctx, path);
+  if (!source)
+  {
+    CLog::Log(LOGDEBUG, "CBlurayStreamCache - prime of {} could not be opened",
+              NameOf(path));
+    return;
+  }
+
+  const int64_t length = source->GetLength();
+  if (length <= 0)
+    return;
+
+  std::shared_ptr<FileState> file;
+  {
+    std::lock_guard<std::mutex> lock(m_cacheMutex);
+    file = GetFileUnlocked(path);
+    // Published before any byte is read: from here libbluray's file_open of
+    // this clip needs no open of its own.
+    file->length = length;
+  }
+
+  const int64_t pages = std::min<int64_t>(
+      static_cast<int64_t>((m_config.nextSizeBytes + m_config.pageSize - 1) / m_config.pageSize),
+      (length - 1) / static_cast<int64_t>(m_config.pageSize) + 1);
+
+  for (int64_t page = 0; page < pages; ++page)
+  {
+    if (ctx.cancel.load() || m_aborted)
+      return;
+
+    // Yield at every page boundary: if the clip being watched needs a page,
+    // it goes first and the rest of this prime waits its turn.
+    {
+      std::lock_guard<std::mutex> lock(m_queueMutex);
+      if (!m_window.empty())
+      {
+        m_primes.push_front(path);
+        return;
+      }
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(m_cacheMutex);
+      if (file->pages.find(page) != file->pages.end())
+        continue;
+    }
+
+    const int64_t offset = page * static_cast<int64_t>(m_config.pageSize);
+    const size_t want = static_cast<size_t>(
+        std::min<int64_t>(static_cast<int64_t>(m_config.pageSize), length - offset));
+
+    ctx.readStartMs.store(NowMs());
+    const int64_t read = source->ReadAt(offset, ctx.buffer.data(), want);
+    ctx.readStartMs.store(0);
+
+    {
+      std::lock_guard<std::mutex> ctxLock(ctx.mutex);
+      if (!ctx.owner)
+        return;
+    }
+
+    if (read != static_cast<int64_t>(want))
+    {
+      ctx.sources.erase(path);
+      return; // a prime is best effort; the boundary just stays cold
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(m_cacheMutex);
+      InsertPageUnlocked(file, page, ctx.buffer.data(), want, true);
+      std::lock_guard<std::mutex> statsLock(m_statsMutex);
+      ++m_stats.primePagesFetched;
+    }
+    m_pageChanged.notify_all();
+  }
 }
 
 int64_t CBlurayStreamCache::ReadDirect(const std::string& path,
@@ -870,12 +1061,14 @@ void CBlurayStreamCache::LogStats(const char* reason)
             "{} bytes) | pages {} requested = {} resident + {} waited + {} fail-open, {} fetched "
             "({} failed, {} retries) | waits >=10ms {} >=100ms {} >=1s {}, max {} ms, longest "
             "stall ridden {} ms | seeks {} in window / {} out | {} evictions, {} fail-open reads, "
-            "{} workers abandoned | {} files retained, {} pages resident",
+            "{} workers abandoned | primes {} started / {} adopted / {} dropped, {} pages | "
+            "{} files retained, {} pages resident",
             reason, s.bytesAhead / (1024 * 1024), s.coverMs, s.reads, s.readsWaited, s.bytes,
             s.pagesRequested, s.pagesResidentOnArrival, s.pagesWaited, s.pagesFailOpen,
             s.pagesFetched, s.pageFailures, s.retries, s.waits10ms, s.waits100ms, s.waits1000ms,
             s.maxWaitMs, s.longestStallRiddenMs, s.seeksInWindow, s.seeksOutOfWindow, s.evictions,
-            s.failOpenReads, s.workersAbandoned, s.filesRetained, s.pagesResidentNow);
+            s.failOpenReads, s.workersAbandoned, s.primesStarted, s.primesAdopted,
+            s.primesDropped, s.primePagesFetched, s.filesRetained, s.pagesResidentNow);
 }
 
 CBlurayStreamCache::CView::CView(std::shared_ptr<CBlurayStreamCache> cache,

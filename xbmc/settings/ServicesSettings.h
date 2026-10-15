@@ -34,6 +34,9 @@ public:
   static void SettingOptionsReadAheadBehindSizesFiller(const SettingConstPtr& setting,
                                                        std::vector<IntegerSettingOption>& list,
                                                        int& current);
+  static void SettingOptionsReadAheadChunkSizesFiller(const SettingConstPtr& setting,
+                                                     std::vector<IntegerSettingOption>& list,
+                                                     int& current);
   static void SettingOptionsCacheChunkSizesFiller(const SettingConstPtr& setting,
                                                   std::vector<IntegerSettingOption>& list,
                                                   int& current);

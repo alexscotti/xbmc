@@ -874,6 +874,9 @@ protected:
     // Tears the read-ahead cache down and joins its worker. Safe to call when
     // no cache is running.
     void StopIsoCache();
+    // Tells the read-ahead cache which clip follows this playitem, so the
+    // next clip's head is pulled before libbluray asks for it.
+    void PublishChainHint(unsigned int playItem);
     void ResetIsoCacheAccessPattern();
 
     /* read-ahead page cache in front of m_pstream (ISO playback only) */

@@ -827,6 +827,22 @@ msgctxt "#14438"
 msgid "Read-ahead for network video"
 msgstr ""
 
+msgctxt "#14439"
+msgid "Next clip lead"
+msgstr ""
+
+msgctxt "#14440"
+msgid "A Blu-ray folder is played as a sequence of clip files, and the start of each one is normally read cold at the join. Once playback is this close to the end of a clip, the start of the next one is fetched in advance, using the disc's own playlist to know which clip that is. Set to Disabled to read every clip join cold."
+msgstr ""
+
+msgctxt "#14441"
+msgid "Next clip amount"
+msgstr ""
+
+msgctxt "#14442"
+msgid "How much of the next clip to fetch in advance. It is taken out of the read-ahead memory while it is held, and it is dropped if the disc goes somewhere else instead."
+msgstr ""
+
 #: xbmc/music/MusicDatabase.cpp
 msgctxt "#181"
 msgid "Select album"

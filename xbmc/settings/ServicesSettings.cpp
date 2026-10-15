@@ -94,6 +94,16 @@ void CServicesSettings::SettingOptionsReadAheadBehindSizesFiller(
     list.emplace_back(StringUtils::Format(mb, size), size);
 }
 
+void CServicesSettings::SettingOptionsReadAheadChunkSizesFiller(
+    const SettingConstPtr& /*setting*/, std::vector<IntegerSettingOption>& list, int& /*current*/)
+{
+  const std::string& mb = CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(37122);
+
+  list.emplace_back(CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(13106), 0);
+  for (const int size : {8, 16, 32, 64})
+    list.emplace_back(StringUtils::Format(mb, size), size);
+}
+
 void CServicesSettings::SettingOptionsReadFactorsFiller(const SettingConstPtr& /*setting*/,
                                                         std::vector<IntegerSettingOption>& list,
                                                         int& /*current*/)

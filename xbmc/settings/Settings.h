@@ -541,6 +541,10 @@ public:
       "filecache.readaheadmemorysize"; // in MBytes, 0 = off
   static constexpr auto SETTING_FILECACHE_READAHEADBEHIND =
       "filecache.readaheadbehind"; // in MBytes
+  static constexpr auto SETTING_FILECACHE_READAHEADNEXTLEAD =
+      "filecache.readaheadnextlead"; // in MBytes, 0 = no clip chaining
+  static constexpr auto SETTING_FILECACHE_READAHEADNEXTSIZE =
+      "filecache.readaheadnextsize"; // in MBytes
 
   // values for SETTING_VIDEOLIBRARY_SHOWUNWATCHEDPLOTS
   static const int VIDEOLIBRARY_PLOTS_SHOW_UNWATCHED_MOVIES = 0;

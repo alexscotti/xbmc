@@ -129,6 +129,14 @@ CBlurayStreamCache::Config ConfigFromSettings()
 
   config.arenaBytes = static_cast<size_t>(memoryMb) * 1024 * 1024;
   config.behindBytes = static_cast<size_t>(std::max(0, behindMb)) * 1024 * 1024;
+  config.nextLeadBytes =
+      static_cast<size_t>(std::max(0, settings->GetInt(
+                                         CSettings::SETTING_FILECACHE_READAHEADNEXTLEAD))) *
+      1024 * 1024;
+  config.nextSizeBytes =
+      static_cast<size_t>(std::max(0, settings->GetInt(
+                                         CSettings::SETTING_FILECACHE_READAHEADNEXTSIZE))) *
+      1024 * 1024;
 
   // The settings are chosen independently, so an arena smaller than what is
   // asked to be kept behind is one click away. Clamp rather than leave no

@@ -2805,6 +2805,32 @@
           </constraints>
           <control type="list" format="string" />
         </setting>
+        <setting id="filecache.readaheadnextlead" type="integer" label="14439" help="14440">
+          <level>2</level>
+          <default>32</default>
+          <dependencies>
+            <dependency type="enable">
+              <condition setting="filecache.readaheadmemorysize" operator="!is">0</condition>
+            </dependency>
+          </dependencies>
+          <constraints>
+            <options>readaheadchunksizes</options>
+          </constraints>
+          <control type="list" format="string" />
+        </setting>
+        <setting id="filecache.readaheadnextsize" type="integer" label="14441" help="14442">
+          <level>2</level>
+          <default>32</default>
+          <dependencies>
+            <dependency type="enable">
+              <condition setting="filecache.readaheadnextlead" operator="!is">0</condition>
+            </dependency>
+          </dependencies>
+          <constraints>
+            <options>readaheadchunksizes</options>
+          </constraints>
+          <control type="list" format="string" />
+        </setting>
       </group>
       <group id="2" label="37053">
         <setting id="filecache.chunksize" type="integer" label="37053" help="37109">

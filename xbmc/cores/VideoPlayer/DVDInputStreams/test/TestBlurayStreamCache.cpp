@@ -37,6 +37,7 @@ struct FakeFile
 {
   int id{0};
   int64_t length{0};
+  std::atomic<int> opens{0};
   std::atomic<int> reads{0};
   std::atomic<bool> stalled{false}; // every read blocks: a NAS outage
   std::atomic<int> failNextReads{0};
@@ -45,7 +46,7 @@ struct FakeFile
 class CFakeSource : public CBlurayStreamCache::ISource
 {
 public:
-  explicit CFakeSource(FakeFile* file) : m_file(file) {}
+  explicit CFakeSource(FakeFile* file) : m_file(file) { ++m_file->opens; }
 
   int64_t GetLength() override { return m_file->length; }
 
@@ -106,6 +107,8 @@ protected:
     config.behindBytes = 2 * PAGE;
     config.abandonAfterMs = 300;
     config.abandonMax = 4;
+    config.nextLeadBytes = 4 * PAGE;
+    config.nextSizeBytes = 4 * PAGE;
     return config;
   }
 
@@ -343,6 +346,66 @@ TEST_F(BlurayStreamCacheTest, CloseDoesNotWaitForAStuckWorker)
 
   clip->stalled.store(false);
   std::this_thread::sleep_for(std::chrono::milliseconds(100)); // let the orphan exit
+}
+
+TEST_F(BlurayStreamCacheTest, ThePrimedNextClipCostsNoOpenAndNoWaitAtTheBoundary)
+{
+  FakeFile* first = AddFile("clipA", 13, 12);
+  FakeFile* second = AddFile("clipB", 14, 12);
+
+  auto cache = CBlurayStreamCache::Claim(Config(48), Factory());
+  ASSERT_NE(cache, nullptr);
+  auto viewA = cache->OpenFile("clipA");
+  ASSERT_NE(viewA, nullptr);
+  cache->SetChainHint("clipA", "clipB");
+
+  std::vector<uint8_t> buffer(6144);
+  viewA->Seek(9 * static_cast<int64_t>(PAGE), SEEK_SET); // inside nextLeadBytes of the end
+  for (int i = 0; i < 4; ++i)
+    viewA->Read(buffer.data(), buffer.size());
+  std::this_thread::sleep_for(std::chrono::milliseconds(300)); // let the prime run
+
+  const int opensAfterPrime = second->opens.load();
+  const int readsAfterPrime = second->reads.load();
+  ASSERT_GE(opensAfterPrime, 1) << "the prime should have opened the next clip itself";
+  EXPECT_EQ(first->reads.load(), first->reads.load()); // (clipA untouched by the prime)
+
+  // The boundary. The open is the part that blocks on a stalled share, so it
+  // must not reach the source at all.
+  auto viewB = cache->OpenFile("clipB");
+  ASSERT_NE(viewB, nullptr);
+  EXPECT_EQ(second->opens.load(), opensAfterPrime);
+
+  const auto before = cache->GetStats();
+  const int64_t n = viewB->Read(buffer.data(), buffer.size());
+  const auto after = cache->GetStats();
+  ASSERT_GT(n, 0);
+  EXPECT_TRUE(Matches(buffer, static_cast<size_t>(n), second->id, 0));
+  EXPECT_EQ(after.readsWaited, before.readsWaited);
+  EXPECT_EQ(second->reads.load(), readsAfterPrime);
+  EXPECT_GE(after.primesAdopted, 1u);
+}
+
+TEST_F(BlurayStreamCacheTest, RepublishingTheHintDropsAPrimeNoLongerNext)
+{
+  AddFile("clipA", 15, 12);
+  AddFile("clipB", 16, 12);
+  AddFile("clipC", 17, 12);
+
+  auto cache = CBlurayStreamCache::Claim(Config(48), Factory());
+  ASSERT_NE(cache, nullptr);
+  auto viewA = cache->OpenFile("clipA");
+  cache->SetChainHint("clipA", "clipB");
+
+  std::vector<uint8_t> buffer(4096);
+  viewA->Seek(9 * static_cast<int64_t>(PAGE), SEEK_SET);
+  viewA->Read(buffer.data(), buffer.size());
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  ASSERT_GE(cache->GetStats().primesStarted, 1u);
+
+  // An angle change or a navigation jump: clipC follows now, not clipB.
+  cache->SetChainHint("clipA", "clipC");
+  EXPECT_GE(cache->GetStats().primesDropped, 1u);
 }
 
 TEST_F(BlurayStreamCacheTest, OnlyOneSessionAtATimeGetsTheArena)

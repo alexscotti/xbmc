@@ -83,6 +83,10 @@ public:
     unsigned int abandonAfterMs{5000};
     // Bound on threads left running on a dead session. Past it, close waits.
     unsigned int abandonMax{4};
+    // Within this much of a clip's end, start pulling the head of the next
+    // clip; this much of it. 0 disables chaining.
+    size_t nextLeadBytes{32 * 1024 * 1024};
+    size_t nextSizeBytes{32 * 1024 * 1024};
   };
 
   // One session at a time gets read-ahead: the arena has a single owner,
@@ -119,7 +123,16 @@ public:
   };
 
   // nullptr when the file cannot be opened; the caller then reads it directly.
+  // A file a prime has already touched is opened WITHOUT going to the source
+  // at all - its length is known and its head is resident - which is how the
+  // blocking open at a clip boundary is avoided.
   std::shared_ptr<CView> OpenFile(const std::string& path);
+
+  // clip -> next clip for the title being played, from the playlist libbluray
+  // is actually playing. Republishing drops a prime that is no longer next
+  // (an angle change, a navigation jump), so nothing stale is ever adopted.
+  // An empty nextPath means "nothing follows": the end of the playlist.
+  void SetChainHint(const std::string& currentPath, const std::string& nextPath);
 
   // Returns every waiting reader at once and fails every pending read. Called
   // from CDVDInputStreamBluray::Abort() before the player waits for its
@@ -170,6 +183,10 @@ public:
     uint64_t evictions{0};
     uint64_t failOpenReads{0};
     uint64_t workersAbandoned{0};
+    uint64_t primesStarted{0};
+    uint64_t primesAdopted{0};
+    uint64_t primesDropped{0};
+    uint64_t primePagesFetched{0};
 
     // sampled at the moment the stats are taken, not accumulated
     uint64_t filesRetained{0};
@@ -250,14 +267,27 @@ private:
                               size_t size,
                               bool& shortPage);
 
+  // `prime` inserts at the COLD end of the LRU instead of the hot end: an
+  // unadopted prime is then evicted before the forward window it would
+  // otherwise push out, which is the eviction order the design asks for
+  // without a second mechanism. Reading it moves it to the hot end as usual.
   void InsertPageUnlocked(const std::shared_ptr<FileState>& file,
                           int64_t pageIndex,
                           const uint8_t* data,
-                          size_t validBytes);
+                          size_t validBytes,
+                          bool prime = false);
   void TouchPageUnlocked(FileState& file, int64_t pageIndex);
   bool ReclaimPageUnlocked(uint8_t*& page);
   void QueueForwardWindow(const std::shared_ptr<FileState>& file, int64_t lastPage);
   void QueuePage(const std::shared_ptr<FileState>& file, int64_t pageIndex);
+  // Queues the head of the next clip once the reader is within nextLeadBytes
+  // of this file's end. Cheap to call on every read: it does nothing until
+  // the threshold, and nothing again once that clip is queued.
+  void MaybeQueuePrime(const std::shared_ptr<FileState>& file, int64_t offset);
+  // Opens the next clip and pulls its head. Yields to window work at every
+  // page boundary, so a 32 MB prime cannot hold the link while the clip being
+  // watched drains.
+  void RunPrime(WorkerCtx& ctx, const std::string& path);
 
   void StartWorker();
   // Abandons the running worker if it has been stuck longer than the
@@ -290,6 +320,8 @@ private:
   std::mutex m_queueMutex;
   std::condition_variable m_queueChanged;
   std::deque<Work> m_window;
+  // Second class of work, always served after the window above.
+  std::deque<std::string> m_primes;
   std::unordered_set<std::string> m_queued;
   std::thread m_worker;
   std::shared_ptr<WorkerCtx> m_workerCtx;
@@ -297,6 +329,11 @@ private:
   unsigned int m_abandoned{0};
 
   std::atomic<bool> m_aborted{false};
+
+  mutable std::mutex m_hintMutex;
+  std::string m_hintCurrent;
+  std::string m_hintNext;
+  std::string m_primeQueuedFor; // the clip the outstanding prime belongs to
 
   mutable std::mutex m_statsMutex;
   Stats m_stats;
