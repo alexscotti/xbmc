@@ -207,6 +207,13 @@ public:
     // hit rate can, because a page fetched just in time counts as a hit.
     uint64_t bytesAhead{0};
     uint64_t coverMs{0};
+    // Where the reader actually is. Without this the log cannot distinguish a
+    // reader advancing through a file from one re-reading the same region, and
+    // those produce identical read/byte counts with very different fetch
+    // counts - which is exactly the ambiguity that made a frozen pagesFetched
+    // unexplainable from the log alone.
+    uint64_t headOffset{0};
+    std::string headFile;
   };
 
   Stats GetStats() const;

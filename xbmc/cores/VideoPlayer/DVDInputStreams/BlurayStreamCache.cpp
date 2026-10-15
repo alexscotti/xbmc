@@ -1091,6 +1091,7 @@ CBlurayStreamCache::Stats CBlurayStreamCache::GetStats() const
   }
   FileState* const head = m_head.load(std::memory_order_acquire);
   const int64_t headOffset = m_headOffset.load(std::memory_order_acquire);
+  stats.headOffset = static_cast<uint64_t>(std::max<int64_t>(0, headOffset));
 
   {
     std::lock_guard<std::mutex> lock(m_cacheMutex);
@@ -1104,6 +1105,7 @@ CBlurayStreamCache::Stats CBlurayStreamCache::GetStats() const
     // page ahead would overstate the cover by whatever sits past the gap.
     if (head)
     {
+      stats.headFile = NameOf(head->path);
       int64_t page = headOffset / static_cast<int64_t>(m_config.pageSize);
       const int64_t into = headOffset % static_cast<int64_t>(m_config.pageSize);
       int64_t ahead = 0;
@@ -1156,14 +1158,17 @@ void CBlurayStreamCache::LogStats(const char* reason)
   // numbers that matter can be grepped out of a run: cover first, because
   // that is what says an outage is survivable.
   CLog::Log(LOGINFO,
-            "CBlurayStreamCache::LogStats - {}: cover {} MB / {} ms ahead | reads {} ({} waited, "
+            "CBlurayStreamCache::LogStats - {}: head {}@{} MB | cover {} MB / {} ms ahead | "
+            "reads {} ({} waited, "
             "{} bytes) | pages {} requested = {} resident + {} waited + {} fail-open, {} fetched "
             "({} failed, {} retries) | waits >=10ms {} >=100ms {} >=1s {}, max {} ms, longest "
             "stall ridden {} ms | seeks {} in window / {} out | {} evictions, {} fail-open reads, "
             "{} workers abandoned | primes {} started / {} adopted / {} dropped, {} pages | "
             "waits: {} first-of-title, {} first-of-clip, {} after-seek, {} sequential | "
             "{} files retained, {} pages resident",
-            reason, s.bytesAhead / (1024 * 1024), s.coverMs, s.reads, s.readsWaited, s.bytes,
+            reason, s.headFile.empty() ? "-" : s.headFile.c_str(),
+            s.headOffset / (1024 * 1024), s.bytesAhead / (1024 * 1024), s.coverMs, s.reads,
+            s.readsWaited, s.bytes,
             s.pagesRequested, s.pagesResidentOnArrival, s.pagesWaited, s.pagesFailOpen,
             s.pagesFetched, s.pageFailures, s.retries, s.waits10ms, s.waits100ms, s.waits1000ms,
             s.maxWaitMs, s.longestStallRiddenMs, s.seeksInWindow, s.seeksOutOfWindow, s.evictions,
