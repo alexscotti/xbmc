@@ -807,6 +807,26 @@ msgid "Duration"
 msgstr ""
 
 #: xbmc/music/infoscanner/MusicInfoScanner.cpp
+msgctxt "#14434"
+msgid "Read-ahead memory"
+msgstr ""
+
+msgctxt "#14435"
+msgid "Memory held for reading a network Blu-ray folder or video file ahead of playback, so a NAS or network stall shorter than the buffered time does not interrupt the film. This is its own memory, separate from the cache memory size above, and it replaces that cache for network video files. Allocated when Kodi starts, so a change takes effect at the next restart. 256 MB is about 40 seconds of a 50 Mbit/s disc and about 16 seconds of a UHD disc at its peak."
+msgstr ""
+
+msgctxt "#14436"
+msgid "Keep behind"
+msgstr ""
+
+msgctxt "#14437"
+msgid "How much of the read-ahead memory is kept behind the playback position, to serve short backwards seeks - including a seek back across a clip boundary - from memory instead of re-reading from the network. Taken out of the read-ahead memory, so a larger value leaves a shorter buffer ahead."
+msgstr ""
+
+msgctxt "#14438"
+msgid "Read-ahead for network video"
+msgstr ""
+
 #: xbmc/music/MusicDatabase.cpp
 msgctxt "#181"
 msgid "Select album"

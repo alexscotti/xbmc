@@ -30,9 +30,13 @@ set(HEADERS BlurayStateSerializer.h
 
 if(TARGET ${APP_NAME_LC}::Bluray)
   list(APPEND SOURCES BlurayIsoCache.cpp
-                      DVDInputStreamBluray.cpp)
+                      BlurayStreamCache.cpp
+                      DVDInputStreamBluray.cpp
+                      StreamCacheSetup.cpp)
   list(APPEND HEADERS BlurayIsoCache.h
-                      DVDInputStreamBluray.h)
+                      BlurayStreamCache.h
+                      DVDInputStreamBluray.h
+                      StreamCacheSetup.h)
 endif()
 
 core_add_library(dvdinputstreams)

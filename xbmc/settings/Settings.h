@@ -535,6 +535,12 @@ public:
   static constexpr auto SETTING_FILECACHE_MEMORYSIZE = "filecache.memorysize"; // in MBytes
   static constexpr auto SETTING_FILECACHE_READFACTOR = "filecache.readfactor"; // as integer (x100)
   static constexpr auto SETTING_FILECACHE_CHUNKSIZE = "filecache.chunksize"; // in Bytes
+  // Read-ahead for network Blu-ray folders and video files: a dedicated arena,
+  // separate from filecache.memorysize above. See CBlurayStreamCache.
+  static constexpr auto SETTING_FILECACHE_READAHEADMEMORYSIZE =
+      "filecache.readaheadmemorysize"; // in MBytes, 0 = off
+  static constexpr auto SETTING_FILECACHE_READAHEADBEHIND =
+      "filecache.readaheadbehind"; // in MBytes
 
   // values for SETTING_VIDEOLIBRARY_SHOWUNWATCHEDPLOTS
   static const int VIDEOLIBRARY_PLOTS_SHOW_UNWATCHED_MOVIES = 0;

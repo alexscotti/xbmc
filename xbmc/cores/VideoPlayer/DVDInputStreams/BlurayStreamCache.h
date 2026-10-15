@@ -1,0 +1,272 @@
+/*
+ *  Copyright (C) 2005-2018 Team Kodi
+ *  This file is part of Kodi - https://kodi.tv
+ *
+ *  SPDX-License-Identifier: GPL-2.0-or-later
+ *  See LICENSES/README.md for more information.
+ */
+
+#pragma once
+
+#include <atomic>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <list>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+// A read-ahead cache for the clips of a Blu-ray folder (BDMV/STREAM/*.m2ts) on
+// a network filesystem, and for a single network video file.
+//
+// libbluray opens each clip through file_open -> a bare CFile::Open, with no
+// buffering of any kind behind it (CFile caches only DVD/Blu-ray-scheme paths
+// or READ_AUDIO_VIDEO opens). The demux queues and the decoder's input hold a
+// few seconds, so a NAS stall longer than that freezes the film, and a Stop
+// during the stall freezes the GUI for as long as the blocking read takes -
+// 9.8 / 24.3 / 25.1 s measured for 11-20 s outages.
+//
+// What this class does about it:
+//
+//  - It is SESSION level, not per clip. One cache per playing title owns the
+//    arena, the worker and the stats; its page map is keyed by (path, page).
+//    A clip open is a view onto it, not an allocation, and a closed clip's
+//    pages stay resident - so a back-seek across a clip boundary is served
+//    from memory rather than re-read from the NAS.
+//  - The reader never blocks on the network. It waits on a condition variable
+//    for a page a worker is fetching, so an outage shorter than the buffered
+//    time is invisible and Abort() returns every waiter at once.
+//  - A worker blocked in a source read is never joined. It owns its own
+//    source handle and a private buffer, copies into the arena only under the
+//    cache lock and only while its session is live, and is abandoned (and
+//    replaced) rather than waited for - at close, and mid-session once it has
+//    been stuck longer than the abandon threshold.
+//  - Memory is a dedicated arena, allocated and pre-faulted once, carved into
+//    fixed pages. A worker never owns an arena page, so a worker abandoned in
+//    a long outage cannot write into memory the next title already owns.
+//
+// Everything the source does is behind ISource, so the whole class is testable
+// against a fake without CFile, libbluray or a network.
+class CBlurayStreamCache : public std::enable_shared_from_this<CBlurayStreamCache>
+{
+public:
+  // One open file the cache reads from. Each worker and each fail-open
+  // fallback gets its own, so two reads can be in flight at once and a read
+  // that is stuck cannot hold up a read that is not.
+  class ISource
+  {
+  public:
+    virtual ~ISource() = default;
+    virtual int64_t GetLength() = 0;
+    // Absolute offset. Returns bytes read, 0 at EOF, < 0 on error.
+    virtual int64_t ReadAt(int64_t offset, uint8_t* buffer, size_t size) = 0;
+  };
+
+  // Opens `path`, or returns nullptr. Called from the reader's thread and from
+  // workers, so it must be safe to call concurrently.
+  using SourceFactory = std::function<std::unique_ptr<ISource>(const std::string& path)>;
+
+  struct Config
+  {
+    size_t arenaBytes{0}; // 0 disables the cache entirely
+    size_t pageSize{1024 * 1024};
+    size_t behindBytes{8 * 1024 * 1024};
+    // A worker stuck in one source read for longer than this is abandoned and
+    // replaced, so the window starts filling again as soon as the link does.
+    unsigned int abandonAfterMs{5000};
+    // Bound on threads left running on a dead session. Past it, close waits.
+    unsigned int abandonMax{4};
+  };
+
+  // One session at a time gets read-ahead: the arena has a single owner,
+  // claimed here and released when the returned cache is destroyed. A second
+  // concurrent session - and a network .mkv draws from the same arena, so this
+  // is one rule across both paths - gets nullptr and reads directly, which is
+  // the behaviour without this class at all.
+  static std::shared_ptr<CBlurayStreamCache> Claim(const Config& config, SourceFactory factory);
+
+  ~CBlurayStreamCache();
+
+  CBlurayStreamCache(const CBlurayStreamCache&) = delete;
+  CBlurayStreamCache& operator=(const CBlurayStreamCache&) = delete;
+
+  // What libbluray's file_open and the single-file input stream hold. Carries
+  // its own file position; the pages behind it belong to the session.
+  class CView
+  {
+  public:
+    CView(std::shared_ptr<CBlurayStreamCache> cache, std::string path, int64_t length);
+
+    int64_t Read(uint8_t* buffer, size_t size);
+    int64_t Seek(int64_t offset, int whence);
+    int64_t GetPosition() const { return m_position; }
+    int64_t GetLength() const { return m_length; }
+    bool AtEof() const { return m_position >= m_length; }
+    const std::string& GetPath() const { return m_path; }
+
+  private:
+    std::shared_ptr<CBlurayStreamCache> m_cache;
+    std::string m_path;
+    int64_t m_length{0};
+    int64_t m_position{0};
+  };
+
+  // nullptr when the file cannot be opened; the caller then reads it directly.
+  std::shared_ptr<CView> OpenFile(const std::string& path);
+
+  // Returns every waiting reader at once and fails every pending read. Called
+  // from CDVDInputStreamBluray::Abort() before the player waits for its
+  // threads, so a Stop during an outage does not wait out the network.
+  void Abort();
+
+  bool IsAborted() const { return m_aborted; }
+
+  void LogStats(const char* reason);
+
+  struct Stats
+  {
+    uint64_t reads{0};
+    uint64_t bytes{0};
+    uint64_t pageHits{0};
+    uint64_t pageMisses{0};
+    uint64_t pagesFetched{0};
+    uint64_t pageFailures{0};
+    uint64_t waits{0};
+    uint64_t waits10ms{0};
+    uint64_t waits100ms{0};
+    uint64_t waits1000ms{0};
+    uint64_t maxWaitMs{0};
+    uint64_t seeksInWindow{0};
+    uint64_t seeksOutOfWindow{0};
+    uint64_t evictions{0};
+    uint64_t failOpenReads{0};
+    uint64_t workersAbandoned{0};
+    uint64_t filesRetained{0};
+    uint64_t pagesResident{0};
+  };
+  Stats GetStats() const;
+
+private:
+  struct FileState;
+
+  // Carries one worker's own state. The worker thread holds a shared_ptr to
+  // it, so abandoning the worker costs nothing and touches nothing of ours:
+  // `owner` is cleared under `mutex` first, and the thread only reaches the
+  // cache while it is set.
+  struct WorkerCtx
+  {
+    std::mutex mutex;
+    CBlurayStreamCache* owner{nullptr};
+    std::atomic<bool> cancel{false};
+    // When the current source read started, in steady-clock ms, or 0 for "not
+    // in a read". Read by the watchdog without the lock.
+    std::atomic<int64_t> readStartMs{0};
+    std::vector<uint8_t> buffer;
+    // Sources this worker has open, by path. Lazily opened, and only this
+    // thread ever touches them.
+    std::unordered_map<std::string, std::unique_ptr<ISource>> sources;
+  };
+
+  struct Resident
+  {
+    uint8_t* data{nullptr};
+    size_t validBytes{0};
+    std::list<std::pair<FileState*, int64_t>>::iterator lruIt;
+  };
+
+  struct FileState
+  {
+    std::string path;
+    int64_t length{0};
+    std::unordered_map<int64_t, Resident> pages;
+    // Pages the worker gave up on after its retries. The reader clears the
+    // mark and reads that page directly, so a fault costs throughput for one
+    // read rather than leaving a permanent hole in the file.
+    std::unordered_set<int64_t> failedPages;
+    // Where the sequential run this file is in reached, and how far ahead has
+    // already been queued, so a steady reader queues one page per page
+    // consumed instead of re-walking the window.
+    int64_t lastReadEndPage{-1};
+    int64_t prefetchHorizon{-1};
+  };
+
+  struct Work
+  {
+    std::shared_ptr<FileState> file;
+    int64_t pageIndex{0};
+  };
+
+  CBlurayStreamCache(const Config& config, SourceFactory factory);
+  bool AllocateArena();
+
+  int64_t ReadAt(const std::string& path, int64_t offset, uint8_t* buffer, size_t size);
+  std::shared_ptr<FileState> GetFileUnlocked(const std::string& path);
+
+  // Copies out of a resident page. Called with m_cacheMutex held, which is
+  // also the only place arena bytes are written, so nothing can be evicted
+  // from under a copy and no page needs pinning.
+  size_t CopyFromPageUnlocked(FileState& file,
+                              int64_t pageIndex,
+                              int64_t offset,
+                              uint8_t* buffer,
+                              size_t size,
+                              bool& shortPage);
+
+  void InsertPageUnlocked(const std::shared_ptr<FileState>& file,
+                          int64_t pageIndex,
+                          const uint8_t* data,
+                          size_t validBytes);
+  void TouchPageUnlocked(FileState& file, int64_t pageIndex);
+  bool ReclaimPageUnlocked(uint8_t*& page);
+  void QueueForwardWindow(const std::shared_ptr<FileState>& file, int64_t lastPage);
+  void QueuePage(const std::shared_ptr<FileState>& file, int64_t pageIndex);
+
+  void StartWorker();
+  // Abandons the running worker if it has been stuck longer than the
+  // threshold, and starts a replacement. Returns true if it did.
+  bool CheckWorkerStall();
+  void AbandonWorkerLocked(std::unique_lock<std::mutex>& queueLock, const char* reason);
+  static void Worker(std::shared_ptr<WorkerCtx> ctx);
+  bool RunOneWorkItem(WorkerCtx& ctx);
+  ISource* GetWorkerSource(WorkerCtx& ctx, const std::string& path);
+
+  int64_t ReadDirect(const std::string& path, int64_t offset, uint8_t* buffer, size_t size);
+
+  size_t PageCount() const { return m_pageCount; }
+  int64_t PageOf(int64_t offset) const { return offset / static_cast<int64_t>(m_config.pageSize); }
+
+  Config m_config;
+  SourceFactory m_factory;
+
+  uint8_t* m_arena{nullptr};
+  size_t m_arenaBytes{0};
+  size_t m_pageCount{0};
+  size_t m_windowPages{1};
+
+  mutable std::mutex m_cacheMutex;
+  std::unordered_map<std::string, std::shared_ptr<FileState>> m_files;
+  std::vector<uint8_t*> m_freePages;
+  std::list<std::pair<FileState*, int64_t>> m_lru; // front = most recently used
+  std::condition_variable m_pageChanged;
+
+  std::mutex m_queueMutex;
+  std::condition_variable m_queueChanged;
+  std::deque<Work> m_window;
+  std::unordered_set<std::string> m_queued;
+  std::thread m_worker;
+  std::shared_ptr<WorkerCtx> m_workerCtx;
+  bool m_stopWorker{false};
+  unsigned int m_abandoned{0};
+
+  std::atomic<bool> m_aborted{false};
+
+  mutable std::mutex m_statsMutex;
+  Stats m_stats;
+};

@@ -11,6 +11,7 @@
 #include "cores/VideoPlayer/BDStageTrace.h"
 
 #include "BlurayIsoCache.h"
+#include "StreamCacheSetup.h"
 #include "DVDCodecs/Overlay/DVDOverlay.h"
 #include "DVDCodecs/Overlay/DVDOverlayImage.h"
 #include "DVDInputStreamFile.h"
@@ -72,6 +73,92 @@ static int read_blocks(void* handle, void* buf, int lba, int num_blocks)
   return blurayStream->ReadBlocks(reinterpret_cast<uint8_t*>(buf), lba, num_blocks);
 }
 
+namespace
+{
+// libbluray's BD_FILE_H over one view onto the session's read-ahead cache.
+CBlurayStreamCache::CView* ViewOf(BD_FILE_H* file)
+{
+  return static_cast<std::shared_ptr<CBlurayStreamCache::CView>*>(file->internal)->get();
+}
+
+void cached_file_close(BD_FILE_H* file)
+{
+  if (!file)
+    return;
+  delete static_cast<std::shared_ptr<CBlurayStreamCache::CView>*>(file->internal);
+  delete file;
+}
+
+int64_t cached_file_read(BD_FILE_H* file, uint8_t* buf, int64_t size)
+{
+  if (size <= 0)
+    return 0;
+  return ViewOf(file)->Read(buf, static_cast<size_t>(size));
+}
+
+int64_t cached_file_write(BD_FILE_H* /*file*/, const uint8_t* /*buf*/, int64_t /*size*/)
+{
+  return -1; // the cache is read-only; libbluray never writes a clip
+}
+
+int64_t cached_file_seek(BD_FILE_H* file, int64_t offset, int32_t origin)
+{
+  return ViewOf(file)->Seek(offset, origin);
+}
+
+int64_t cached_file_tell(BD_FILE_H* file)
+{
+  return ViewOf(file)->GetPosition();
+}
+
+int cached_file_eof(BD_FILE_H* file)
+{
+  return ViewOf(file)->AtEof() ? 1 : 0;
+}
+
+// Our own dir_open, so the handle can be the session struct: it just forwards
+// the base path to the shared callback.
+BD_DIR_H* session_dir_open(void* handle, const char* rel_path)
+{
+  auto* session = static_cast<SBlurayFileSession*>(handle);
+  if (!session)
+    return nullptr;
+  return CBlurayCallback::dir_open(&session->rootPath, rel_path);
+}
+
+// The playback path's file_open. A clip gets the session's cache in front of
+// it; everything else libbluray opens goes through the shared callback
+// unchanged, so index/mpls/clpi/BD-J reads behave exactly as before.
+BD_FILE_H* session_file_open(void* handle, const char* rel_path)
+{
+  auto* session = static_cast<SBlurayFileSession*>(handle);
+  if (!session)
+    return nullptr;
+
+  if (session->cache && STREAMCACHE::IsCacheableClip(rel_path))
+  {
+    const std::string path = URIUtils::AddFileToFolder(session->rootPath, rel_path);
+    if (auto view = session->cache->OpenFile(path))
+    {
+      auto* file = new BD_FILE_H;
+      file->close = cached_file_close;
+      file->seek = cached_file_seek;
+      file->read = cached_file_read;
+      file->write = cached_file_write;
+      file->tell = cached_file_tell;
+      file->eof = cached_file_eof;
+      file->internal = new std::shared_ptr<CBlurayStreamCache::CView>(std::move(view));
+      return file;
+    }
+    // Could not be cached - fall through and open it directly, which is what
+    // happens with the read-ahead switched off.
+    CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - {} not cached, opening it directly", rel_path);
+  }
+
+  return CBlurayCallback::file_open(&session->rootPath, rel_path);
+}
+} // namespace
+
 static void bluray_overlay_cb(void *this_gen, const BD_OVERLAY * ov)
 {
   static_cast<CDVDInputStreamBluray*>(this_gen)->OverlayCallback(ov);
@@ -102,6 +189,14 @@ CDVDInputStreamBluray::~CDVDInputStreamBluray()
 void CDVDInputStreamBluray::Abort()
 {
   m_hold = HOLD_EXIT;
+
+  // Directly, not via m_hold: that flag is only read at the top of the nav
+  // loop in Read(), and the non-navmode branch - direct playlist playback - is
+  // a bare bd_read that never looks at it. Every reader waiting on a page
+  // returns now, so CloseFile's wait for the player thread does not become a
+  // wait for the network.
+  if (m_fileSession && m_fileSession->cache)
+    m_fileSession->cache->Abort();
 }
 
 bool CDVDInputStreamBluray::IsEOF()
@@ -575,6 +670,13 @@ bool CDVDInputStreamBluray::Open()
   {
     m_rootPath = root;
 
+    // Read-ahead for the clips of this folder. A nullptr cache is not an
+    // error: the setting is off, the folder is local, or another session holds
+    // the arena, and then every clip is opened directly as before.
+    m_fileSession = std::make_unique<SBlurayFileSession>();
+    m_fileSession->rootPath = root;
+    m_fileSession->cache = STREAMCACHE::ClaimFor(root);
+
 #if defined(HAS_UDFREAD)
     // Only in files mode does libbluray reach the disc through Kodi's filesystem, opening a dozen
     // or so files and directories on it, and then the clips as they play. On a disc image each of
@@ -583,7 +685,7 @@ bool CDVDInputStreamBluray::Open()
     m_udfMount.emplace(root);
 #endif
 
-    if (!bd_open_files(m_bd, &m_rootPath, CBlurayCallback::dir_open, CBlurayCallback::file_open))
+    if (!bd_open_files(m_bd, m_fileSession.get(), session_dir_open, session_file_open))
     {
       CLog::Log(LOGERROR, "CDVDInputStreamBluray::Open - failed to open {} in files mode",
                 CURL::GetRedacted(root));
@@ -829,6 +931,10 @@ void CDVDInputStreamBluray::Close()
 
   m_bd = nullptr;
   m_pstream.reset();
+  // After bd_close(): until then libbluray can still read through a view onto
+  // it. Its destructor logs the session's stats and abandons rather than joins
+  // a worker stuck in a read.
+  m_fileSession.reset();
   m_rootPath.clear();
 
 #if defined(HAS_UDFREAD)

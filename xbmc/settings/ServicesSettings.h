@@ -28,6 +28,12 @@ public:
   static void SettingOptionsReadFactorsFiller(const SettingConstPtr& setting,
                                               std::vector<IntegerSettingOption>& list,
                                               int& current);
+  static void SettingOptionsReadAheadMemorySizesFiller(const SettingConstPtr& setting,
+                                                      std::vector<IntegerSettingOption>& list,
+                                                      int& current);
+  static void SettingOptionsReadAheadBehindSizesFiller(const SettingConstPtr& setting,
+                                                       std::vector<IntegerSettingOption>& list,
+                                                       int& current);
   static void SettingOptionsCacheChunkSizesFiller(const SettingConstPtr& setting,
                                                   std::vector<IntegerSettingOption>& list,
                                                   int& current);

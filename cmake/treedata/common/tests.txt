@@ -8,6 +8,7 @@ xbmc/cores/RetroPlayer/savestates/test test/retroplayer_savestates
 xbmc/cores/RetroPlayer/streams/memory/test test/retroplayer_memory
 xbmc/cores/RetroPlayer/test test/retroplayer
 xbmc/cores/VideoPlayer/Buffers/test test/videoplayer_buffers
+xbmc/cores/VideoPlayer/DVDInputStreams/test test/videoplayer_inputstreams
 xbmc/cores/VideoPlayer/test       test/videoplayer
 xbmc/cores/VideoPlayer/DVDDemuxers/test test/dvddemuxers
 xbmc/cores/VideoPlayer/DVDCodecs/Overlay/test test/dvdoverlaycodecs

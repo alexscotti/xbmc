@@ -446,6 +446,10 @@ void CSettings::InitializeOptionFillers()
   GetSettingsManager()->RegisterSettingOptionsFiller(
       "filecachereadfactors", CServicesSettings::SettingOptionsReadFactorsFiller);
   GetSettingsManager()->RegisterSettingOptionsFiller(
+      "readaheadmemorysizes", CServicesSettings::SettingOptionsReadAheadMemorySizesFiller);
+  GetSettingsManager()->RegisterSettingOptionsFiller(
+      "readaheadbehindsizes", CServicesSettings::SettingOptionsReadAheadBehindSizesFiller);
+  GetSettingsManager()->RegisterSettingOptionsFiller(
       "filecachechunksizes", CServicesSettings::SettingOptionsCacheChunkSizesFiller);
   GetSettingsManager()->RegisterSettingOptionsFiller(
       "playerqueuetimesizes", CPlayerSettings::SettingOptionsQueueTimeSizesFiller);
@@ -504,6 +508,8 @@ void CSettings::UninitializeOptionFillers()
   GetSettingsManager()->UnregisterSettingOptionsFiller("filechunksizes");
   GetSettingsManager()->UnregisterSettingOptionsFiller("filecachebuffermodes");
   GetSettingsManager()->UnregisterSettingOptionsFiller("filecachememorysizes");
+  GetSettingsManager()->UnregisterSettingOptionsFiller("readaheadmemorysizes");
+  GetSettingsManager()->UnregisterSettingOptionsFiller("readaheadbehindsizes");
   GetSettingsManager()->UnregisterSettingOptionsFiller("filecachereadfactors");
   GetSettingsManager()->UnregisterSettingOptionsFiller("filecachechunksizes");
   GetSettingsManager()->UnregisterSettingOptionsFiller("playerqueuetimesizes");

@@ -73,6 +73,27 @@ void CServicesSettings::SettingOptionsMemorySizesFiller(const SettingConstPtr& /
   list.emplace_back(CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(37115), 0);
 }
 
+void CServicesSettings::SettingOptionsReadAheadMemorySizesFiller(
+    const SettingConstPtr& /*setting*/, std::vector<IntegerSettingOption>& list, int& /*current*/)
+{
+  // Its own list rather than the cache one above: there 0 means Auto, here it
+  // means the read-ahead is off entirely.
+  const std::string& mb = CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(37122);
+
+  list.emplace_back(CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(13106), 0);
+  for (const int size : {64, 96, 128, 192, 256, 384, 512})
+    list.emplace_back(StringUtils::Format(mb, size), size);
+}
+
+void CServicesSettings::SettingOptionsReadAheadBehindSizesFiller(
+    const SettingConstPtr& /*setting*/, std::vector<IntegerSettingOption>& list, int& /*current*/)
+{
+  const std::string& mb = CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(37122);
+
+  for (const int size : {0, 4, 8, 16, 32})
+    list.emplace_back(StringUtils::Format(mb, size), size);
+}
+
 void CServicesSettings::SettingOptionsReadFactorsFiller(const SettingConstPtr& /*setting*/,
                                                         std::vector<IntegerSettingOption>& list,
                                                         int& /*current*/)

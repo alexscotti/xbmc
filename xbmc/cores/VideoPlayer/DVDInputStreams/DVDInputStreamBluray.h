@@ -61,6 +61,17 @@ extern "C"
 #define HDMV_PID_IG_LAST          0x141f
 
 class CBlurayIsoCache;
+class CBlurayStreamCache;
+
+// The handle the playback path's own dir_open/file_open get. This is why
+// CBlurayCallback's handle can stay a bare std::string* for CBlurayDirectory:
+// libbluray takes the callbacks as arguments to bd_open_files, so the browse
+// path and the playback path never have to agree on a handle type.
+struct SBlurayFileSession
+{
+  std::string rootPath;
+  std::shared_ptr<CBlurayStreamCache> cache;
+};
 class CDVDOverlayImage;
 class IVideoPlayer;
 class CDVDDemux;
@@ -845,6 +856,9 @@ protected:
     int m_menuDomainLogged = -1;
     std::unique_ptr<CDVDInputStreamFile> m_pstream;
     std::string m_rootPath;
+
+    // Read-ahead for a Blu-ray FOLDER on a network share (files mode).
+    std::unique_ptr<SBlurayFileSession> m_fileSession;
 
 #if defined(HAS_UDFREAD)
     // Keeps a disc image's UDF volume mounted for as long as the disc is open
