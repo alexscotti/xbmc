@@ -238,6 +238,17 @@ std::shared_ptr<CBlurayStreamCache::CView> CBlurayStreamCache::OpenFile(const st
 
   if (length != 0 && !everRead)
   {
+    // Consumed, so it is no longer outstanding. Without this the next hint
+    // republish - which happens as soon as playback moves into this clip -
+    // sees it still named as the queued prime, finds it is not the NEW next
+    // clip, and counts a drop: every successful prime was tallied as both
+    // adopted and dropped (4 started / 3 adopted / 4 dropped on Sin City).
+    {
+      std::lock_guard<std::mutex> hintLock(m_hintMutex);
+      if (m_primeQueuedFor == path)
+        m_primeQueuedFor.clear();
+    }
+
     // No open is needed either way once the length is known, but only a file
     // no reader has touched is an adopted PRIME. A clip that was played and
     // closed also has its length, and re-opening it for a back-seek across
@@ -514,11 +525,8 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
   }
 
   // Where the cover is measured from.
-  {
-    std::lock_guard<std::mutex> lock(m_headMutex);
-    m_headFile = file;
-    m_headOffset = offset + static_cast<int64_t>(done);
-  }
+  m_head.store(file.get(), std::memory_order_release);
+  m_headOffset.store(offset + static_cast<int64_t>(done), std::memory_order_release);
 
   const int64_t firstPage = PageOf(offset);
   const int64_t lastPage = PageOf(offset + static_cast<int64_t>(done) - 1);
@@ -692,10 +700,11 @@ bool CBlurayStreamCache::ReclaimPageUnlocked(uint8_t*& page)
 CBlurayStreamCache::PageClass CBlurayStreamCache::ClassifyUnlocked(const FileState* file,
                                                                   int64_t pageIndex) const
 {
-  // The read head, without taking m_headMutex: this runs under m_cacheMutex
-  // and the head is only ever advanced by a reader, so a stale read of it
-  // costs a slightly wrong eviction choice and nothing else.
-  const FileState* head = m_headFile.get();
+  // Runs under m_cacheMutex, so the head is read from the atomics rather
+  // than behind a second lock. A slightly stale head only means a slightly
+  // wrong eviction choice, which is fine - but it has to be read ATOMICALLY
+  // to mean even that.
+  const FileState* head = m_head.load(std::memory_order_acquire);
   if (!head || file != head)
   {
     // Another file: either a clip being primed that nobody has read yet, or
@@ -705,7 +714,8 @@ CBlurayStreamCache::PageClass CBlurayStreamCache::ClassifyUnlocked(const FileSta
     return file->everRead ? PageClass::Behind : PageClass::Prime;
   }
 
-  const int64_t headPage = m_headOffset / static_cast<int64_t>(m_config.pageSize);
+  const int64_t headPage =
+      m_headOffset.load(std::memory_order_acquire) / static_cast<int64_t>(m_config.pageSize);
   return pageIndex < headPage ? PageClass::Behind : PageClass::Window;
 }
 
@@ -1064,13 +1074,8 @@ CBlurayStreamCache::Stats CBlurayStreamCache::GetStats() const
     std::lock_guard<std::mutex> lock(m_statsMutex);
     stats = m_stats;
   }
-  std::shared_ptr<FileState> head;
-  int64_t headOffset = 0;
-  {
-    std::lock_guard<std::mutex> lock(m_headMutex);
-    head = m_headFile;
-    headOffset = m_headOffset;
-  }
+  FileState* const head = m_head.load(std::memory_order_acquire);
+  const int64_t headOffset = m_headOffset.load(std::memory_order_acquire);
 
   {
     std::lock_guard<std::mutex> lock(m_cacheMutex);

@@ -358,8 +358,18 @@ private:
   int64_t m_lastStatsLogMs{0};
 
   // The read head the cover is measured from: the file the reader is in and
-  // the offset it has reached.
-  mutable std::mutex m_headMutex;
-  std::shared_ptr<FileState> m_headFile;
-  int64_t m_headOffset{0};
+  // the offset it has reached. Atomics, not a mutex, because the eviction
+  // path reads them while holding m_cacheMutex and must not take a second
+  // lock there.
+  //
+  // A RAW pointer is safe only because of this invariant: a FileState is
+  // created by GetFileUnlocked and never removed while the cache lives -
+  // m_files is only cleared by the destructor, after the workers are gone.
+  // Keep it that way; erasing a FileState mid-session would leave this
+  // dangling. (It used to be a shared_ptr read without the lock, with a
+  // comment claiming a stale read was harmless. It is not: an unsynchronised
+  // read racing an assignment is undefined behaviour, and ClassifyUnlocked
+  // dereferences it. ThreadSanitizer caught it in 2 runs out of 12.)
+  std::atomic<FileState*> m_head{nullptr};
+  std::atomic<int64_t> m_headOffset{0};
 };
