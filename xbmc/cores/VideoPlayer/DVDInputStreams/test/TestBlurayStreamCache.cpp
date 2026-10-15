@@ -147,6 +147,10 @@ TEST_F(BlurayStreamCacheTest, ServesASequentialWalkByteForByte)
   EXPECT_EQ(view->Read(buffer.data(), buffer.size()), 0); // past EOF, not an error
   EXPECT_GT(cache->GetStats().pagesFetched, 0u);
   EXPECT_EQ(cache->GetStats().failOpenReads, 0u);
+
+  // The counters partition cleanly: no page access is counted twice.
+  const auto s = cache->GetStats();
+  EXPECT_EQ(s.pagesRequested, s.pagesResidentOnArrival + s.pagesWaited + s.pagesFailOpen);
 }
 
 TEST_F(BlurayStreamCacheTest, ReadAheadKeepsTheReaderHitting)
@@ -166,7 +170,11 @@ TEST_F(BlurayStreamCacheTest, ReadAheadKeepsTheReaderHitting)
   }
 
   const auto stats = cache->GetStats();
-  EXPECT_GT(stats.pageHits, stats.pageMisses * 4);
+  EXPECT_EQ(stats.pagesRequested,
+            stats.pagesResidentOnArrival + stats.pagesWaited + stats.pagesFailOpen);
+  EXPECT_GT(stats.pagesResidentOnArrival, stats.pagesWaited * 4);
+  // Most reads never wait at all, which is the figure that matters.
+  EXPECT_LT(stats.readsWaited * 4, stats.reads);
 }
 
 TEST_F(BlurayStreamCacheTest, SeekInsideTheWindowCostsNoWait)
@@ -188,7 +196,9 @@ TEST_F(BlurayStreamCacheTest, SeekInsideTheWindowCostsNoWait)
   const auto after = cache->GetStats();
   ASSERT_GT(n, 0);
   EXPECT_TRUE(Matches(buffer, static_cast<size_t>(n), clip->id, inWindow));
-  EXPECT_EQ(after.waits, before.waits);
+  EXPECT_EQ(after.readsWaited, before.readsWaited);
+  EXPECT_EQ(after.pagesWaited, before.pagesWaited);
+  EXPECT_EQ(after.pagesResidentOnArrival, before.pagesResidentOnArrival + 1);
   EXPECT_EQ(after.seeksInWindow, before.seeksInWindow + 1);
 
   // Far past the window: nothing resident, so it has to be fetched - and the
@@ -362,6 +372,26 @@ TEST_F(BlurayStreamCacheTest, APageTheWorkerGivesUpOnIsStillServed)
   ASSERT_GT(n, 0) << "a page the worker could not load must degrade to a direct read, not to EOF";
   EXPECT_TRUE(Matches(buffer, static_cast<size_t>(n), clip->id, 0));
   EXPECT_GT(cache->GetStats().failOpenReads, 0u);
+}
+
+TEST_F(BlurayStreamCacheTest, ReportsTheCoverAheadOfTheReadHead)
+{
+  AddFile("clip", 12, 200);
+  auto cache = CBlurayStreamCache::Claim(Config(64), Factory());
+  ASSERT_NE(cache, nullptr);
+  auto view = cache->OpenFile("clip");
+
+  std::vector<uint8_t> buffer(6144);
+  for (int i = 0; i < 50; ++i)
+    view->Read(buffer.data(), buffer.size());
+  std::this_thread::sleep_for(std::chrono::milliseconds(400)); // let the window fill
+  view->Read(buffer.data(), buffer.size()); // refresh the read head
+
+  const auto stats = cache->GetStats();
+  // The cover is what says an outage is survivable, so it has to be real
+  // bytes contiguously ahead of where the reader is - not every resident page.
+  EXPECT_GT(stats.bytesAhead, 8u * PAGE);
+  EXPECT_GT(stats.coverMs, 0u);
 }
 
 TEST_F(BlurayStreamCacheTest, AnArenaTooSmallToBeUsefulIsRefused)

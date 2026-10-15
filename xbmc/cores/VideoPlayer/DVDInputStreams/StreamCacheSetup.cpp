@@ -9,6 +9,7 @@
 #include "StreamCacheSetup.h"
 
 #include "ServiceBroker.h"
+#include "URL.h"
 #include "filesystem/File.h"
 #include "filesystem/IFileTypes.h"
 #include "settings/Settings.h"
@@ -163,13 +164,33 @@ bool IsCacheableClip(const std::string& relPath)
 
 std::shared_ptr<CBlurayStreamCache> ClaimFor(const std::string& path)
 {
+  // Every path out of here says why, at LOGINFO. Returning nullptr silently
+  // made "no cache line in the log" ambiguous between the setting being off,
+  // a local path, and this code never being reached - which is the first
+  // thing anyone looks for when read-ahead appears not to be working.
   if (!IsRemotePath(path))
+  {
+    CLog::Log(LOGINFO, "STREAMCACHE - no read-ahead for {}: not a network filesystem",
+              CURL::GetRedacted(path));
     return nullptr;
+  }
 
   const CBlurayStreamCache::Config config = ConfigFromSettings();
   if (config.arenaBytes == 0)
+  {
+    CLog::Log(LOGINFO, "STREAMCACHE - no read-ahead for {}: read-ahead memory is set to 0",
+              CURL::GetRedacted(path));
     return nullptr;
+  }
 
-  return CBlurayStreamCache::Claim(config, FileSourceFactory());
+  auto cache = CBlurayStreamCache::Claim(config, FileSourceFactory());
+  if (!cache)
+  {
+    // Claim logs which of its own reasons applied (arena in use, allocation
+    // refused); this says the attempt was made for this path.
+    CLog::Log(LOGINFO, "STREAMCACHE - no read-ahead for {}: the arena could not be claimed",
+              CURL::GetRedacted(path));
+  }
+  return cache;
 }
 } // namespace STREAMCACHE

@@ -129,28 +129,59 @@ public:
   bool IsAborted() const { return m_aborted; }
 
   void LogStats(const char* reason);
+  // Logs the stats if it has been longer than the interval, so a long film
+  // reports while it plays instead of only at the stop. Called off the read
+  // path with no cache lock held.
+  void MaybeLogStats();
 
+  // Counters are deliberately split by unit, and never overlap: a page access
+  // is counted as resident-on-arrival OR waited-for, never both. The earlier
+  // pair did overlap - a page the reader waited for was then copied, which
+  // counted a hit as well - and mixed per-read with per-page totals, so the
+  // "hit rate" it implied was meaningless.
   struct Stats
   {
+    // per read request from libbluray / the input stream
     uint64_t reads{0};
+    uint64_t readsWaited{0}; // waited on at least one page: the miss rate
     uint64_t bytes{0};
-    uint64_t pageHits{0};
-    uint64_t pageMisses{0};
+
+    // per distinct page access by the reader. pagesRequested ==
+    // pagesResidentOnArrival + pagesWaited + pagesFailOpen.
+    uint64_t pagesRequested{0};
+    uint64_t pagesResidentOnArrival{0};
+    uint64_t pagesWaited{0};
+    uint64_t pagesFailOpen{0};
+
+    // what the worker did
     uint64_t pagesFetched{0};
     uint64_t pageFailures{0};
-    uint64_t waits{0};
+    uint64_t retries{0};
+
     uint64_t waits10ms{0};
     uint64_t waits100ms{0};
     uint64_t waits1000ms{0};
     uint64_t maxWaitMs{0};
+    uint64_t longestStallRiddenMs{0};
+
     uint64_t seeksInWindow{0};
     uint64_t seeksOutOfWindow{0};
+
     uint64_t evictions{0};
     uint64_t failOpenReads{0};
     uint64_t workersAbandoned{0};
+
+    // sampled at the moment the stats are taken, not accumulated
     uint64_t filesRetained{0};
-    uint64_t pagesResident{0};
+    uint64_t pagesResidentNow{0};
+    // Contiguous resident bytes ahead of the read head, and what that is
+    // worth in milliseconds at the rate this session has actually been read
+    // at. This is the number that says whether an outage is survivable; no
+    // hit rate can, because a page fetched just in time counts as a hit.
+    uint64_t bytesAhead{0};
+    uint64_t coverMs{0};
   };
+
   Stats GetStats() const;
 
 private:
@@ -269,4 +300,12 @@ private:
 
   mutable std::mutex m_statsMutex;
   Stats m_stats;
+  int64_t m_startedMs{0};
+  int64_t m_lastStatsLogMs{0};
+
+  // The read head the cover is measured from: the file the reader is in and
+  // the offset it has reached.
+  mutable std::mutex m_headMutex;
+  std::shared_ptr<FileState> m_headFile;
+  int64_t m_headOffset{0};
 };

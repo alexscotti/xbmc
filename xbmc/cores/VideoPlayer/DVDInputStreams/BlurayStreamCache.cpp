@@ -44,6 +44,10 @@ std::string WorkKey(const std::string& path, int64_t pageIndex)
 // reported as the end of the file.
 constexpr unsigned int PAGE_READ_ATTEMPTS = 3;
 constexpr unsigned int PAGE_RETRY_BASE_MS = 200;
+
+// How often the stats are logged while a title plays. Only at the close is no
+// use for telling whether read-ahead is keeping up during a two-hour film.
+constexpr int64_t STATS_LOG_INTERVAL_MS = 30000;
 } // namespace
 
 std::shared_ptr<CBlurayStreamCache> CBlurayStreamCache::Claim(const Config& config,
@@ -69,6 +73,8 @@ std::shared_ptr<CBlurayStreamCache> CBlurayStreamCache::Claim(const Config& conf
     return nullptr; // the destructor releases the claim
   }
 
+  cache->m_startedMs = NowMs();
+  cache->m_lastStatsLogMs = cache->m_startedMs;
   cache->StartWorker();
   CLog::Log(LOGINFO,
             "CBlurayStreamCache - {} byte arena, {} byte pages ({} pages, {} window, {} behind), "
@@ -267,6 +273,7 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
 
   size_t done = 0;
   bool servedWholeFromCache = true;
+  bool readWaited = false;
   while (done < wanted)
   {
     const int64_t pageIndex = PageOf(offset + static_cast<int64_t>(done));
@@ -278,6 +285,12 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
       std::unique_lock<std::mutex> lock(m_cacheMutex);
       const int64_t waitStart = NowMs();
       bool waited = false;
+      bool counted = false;
+
+      {
+        std::lock_guard<std::mutex> statsLock(m_statsMutex);
+        ++m_stats.pagesRequested;
+      }
 
       while (true)
       {
@@ -290,6 +303,17 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
           copied = CopyFromPageUnlocked(*file, pageIndex, offset + static_cast<int64_t>(done),
                                         buffer + done, wanted - done, shortPage);
           servedFromCache = true;
+          if (!counted)
+          {
+            counted = true;
+            std::lock_guard<std::mutex> statsLock(m_statsMutex);
+            // Exactly one of these per page access, and a page we waited for
+            // is NOT also counted as resident-on-arrival.
+            if (waited)
+              ++m_stats.pagesWaited;
+            else
+              ++m_stats.pagesResidentOnArrival;
+          }
           if (shortPage && copied == 0)
             return done > 0 ? static_cast<int64_t>(done) : -1;
           break;
@@ -297,16 +321,16 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
 
         if (file->failedPages.erase(pageIndex) != 0)
         {
+          if (!counted)
+          {
+            counted = true;
+            std::lock_guard<std::mutex> statsLock(m_statsMutex);
+            ++m_stats.pagesFailOpen;
+          }
           // The worker gave up on this page. Read it here instead; the mark is
           // already cleared, so the next pass over it tries the cache again.
           readDirect = true;
           break;
-        }
-
-        if (!waited)
-        {
-          std::lock_guard<std::mutex> statsLock(m_statsMutex);
-          ++m_stats.pageMisses;
         }
 
         // Not resident: make sure it is queued, then wait for it rather than
@@ -336,9 +360,10 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
       if (waited)
       {
         servedWholeFromCache = false;
+        readWaited = true;
         const uint64_t ms = static_cast<uint64_t>(std::max<int64_t>(0, NowMs() - waitStart));
         std::lock_guard<std::mutex> statsLock(m_statsMutex);
-        ++m_stats.waits;
+        m_stats.longestStallRiddenMs = std::max(m_stats.longestStallRiddenMs, ms);
         if (ms >= 10)
           ++m_stats.waits10ms;
         if (ms >= 100)
@@ -352,6 +377,7 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
     if (readDirect)
     {
       servedWholeFromCache = false;
+      readWaited = true;
       const int64_t n =
           ReadDirect(path, offset + static_cast<int64_t>(done), buffer + done, wanted - done);
       {
@@ -373,6 +399,15 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
   {
     std::lock_guard<std::mutex> lock(m_statsMutex);
     m_stats.bytes += done;
+    if (readWaited)
+      ++m_stats.readsWaited;
+  }
+
+  // Where the cover is measured from.
+  {
+    std::lock_guard<std::mutex> lock(m_headMutex);
+    m_headFile = file;
+    m_headOffset = offset + static_cast<int64_t>(done);
   }
 
   const int64_t firstPage = PageOf(offset);
@@ -397,6 +432,7 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
   }
 
   QueueForwardWindow(file, lastPage);
+  MaybeLogStats();
   return static_cast<int64_t>(done);
 }
 
@@ -424,10 +460,6 @@ size_t CBlurayStreamCache::CopyFromPageUnlocked(FileState& file,
   std::memcpy(buffer, it->second.data + (offset - pageStart), chunk);
   TouchPageUnlocked(file, pageIndex);
 
-  {
-    std::lock_guard<std::mutex> lock(m_statsMutex);
-    ++m_stats.pageHits;
-  }
   shortPage = (offset + static_cast<int64_t>(chunk)) >= pageEnd &&
               it->second.validBytes < m_config.pageSize;
   return chunk;
@@ -708,6 +740,10 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
     // rather than reporting it as the end of the file.
     ctx.sources.erase(work.file->path);
     read = -1;
+    {
+      std::lock_guard<std::mutex> statsLock(m_statsMutex);
+      ++m_stats.retries;
+    }
     if (attempt + 1 < PAGE_READ_ATTEMPTS)
       std::this_thread::sleep_for(std::chrono::milliseconds(PAGE_RETRY_BASE_MS << attempt));
   }
@@ -758,28 +794,88 @@ CBlurayStreamCache::Stats CBlurayStreamCache::GetStats() const
     std::lock_guard<std::mutex> lock(m_statsMutex);
     stats = m_stats;
   }
+  std::shared_ptr<FileState> head;
+  int64_t headOffset = 0;
+  {
+    std::lock_guard<std::mutex> lock(m_headMutex);
+    head = m_headFile;
+    headOffset = m_headOffset;
+  }
+
   {
     std::lock_guard<std::mutex> lock(m_cacheMutex);
     stats.filesRetained = m_files.size();
-    stats.pagesResident = 0;
+    stats.pagesResidentNow = 0;
     for (const auto& file : m_files)
-      stats.pagesResident += file.second->pages.size();
+      stats.pagesResidentNow += file.second->pages.size();
+
+    // Contiguous resident bytes ahead of the read head. Contiguous is the
+    // point: a gap is where playback would stop, so counting every resident
+    // page ahead would overstate the cover by whatever sits past the gap.
+    if (head)
+    {
+      int64_t page = headOffset / static_cast<int64_t>(m_config.pageSize);
+      const int64_t into = headOffset % static_cast<int64_t>(m_config.pageSize);
+      int64_t ahead = 0;
+      auto it = head->pages.find(page);
+      if (it != head->pages.end() && static_cast<int64_t>(it->second.validBytes) > into)
+      {
+        ahead = static_cast<int64_t>(it->second.validBytes) - into;
+        while (true)
+        {
+          auto next = head->pages.find(++page);
+          if (next == head->pages.end())
+            break;
+          ahead += static_cast<int64_t>(next->second.validBytes);
+        }
+      }
+      stats.bytesAhead = static_cast<uint64_t>(ahead);
+    }
   }
+
+  // At the rate this session has actually been read at, not an assumed
+  // bitrate.
+  const int64_t elapsed = NowMs() - m_startedMs;
+  if (elapsed > 0 && stats.bytes > 0 && stats.bytesAhead > 0)
+  {
+    const double bytesPerMs = static_cast<double>(stats.bytes) / static_cast<double>(elapsed);
+    if (bytesPerMs > 0)
+      stats.coverMs = static_cast<uint64_t>(static_cast<double>(stats.bytesAhead) / bytesPerMs);
+  }
+
   return stats;
+}
+
+void CBlurayStreamCache::MaybeLogStats()
+{
+  const int64_t now = NowMs();
+  {
+    std::lock_guard<std::mutex> lock(m_statsMutex);
+    if ((now - m_lastStatsLogMs) < STATS_LOG_INTERVAL_MS)
+      return;
+    m_lastStatsLogMs = now;
+  }
+  LogStats("playing");
 }
 
 void CBlurayStreamCache::LogStats(const char* reason)
 {
   const Stats s = GetStats();
+
+  // One line, LOGINFO so it survives the box's log level, and shaped so the
+  // numbers that matter can be grepped out of a run: cover first, because
+  // that is what says an outage is survivable.
   CLog::Log(LOGINFO,
-            "CBlurayStreamCache::LogStats - {}: {} reads ({} bytes), {} page hits / {} misses, {} "
-            "pages fetched ({} failed), {} waits ({} >=10ms, {} >=100ms, {} >=1s, max {} ms), "
-            "seeks {} in window / {} out, {} evictions, {} fail-open reads, {} workers abandoned, "
-            "{} files retained, {} pages resident",
-            reason, s.reads, s.bytes, s.pageHits, s.pageMisses, s.pagesFetched, s.pageFailures,
-            s.waits, s.waits10ms, s.waits100ms, s.waits1000ms, s.maxWaitMs, s.seeksInWindow,
-            s.seeksOutOfWindow, s.evictions, s.failOpenReads, s.workersAbandoned, s.filesRetained,
-            s.pagesResident);
+            "CBlurayStreamCache::LogStats - {}: cover {} MB / {} ms ahead | reads {} ({} waited, "
+            "{} bytes) | pages {} requested = {} resident + {} waited + {} fail-open, {} fetched "
+            "({} failed, {} retries) | waits >=10ms {} >=100ms {} >=1s {}, max {} ms, longest "
+            "stall ridden {} ms | seeks {} in window / {} out | {} evictions, {} fail-open reads, "
+            "{} workers abandoned | {} files retained, {} pages resident",
+            reason, s.bytesAhead / (1024 * 1024), s.coverMs, s.reads, s.readsWaited, s.bytes,
+            s.pagesRequested, s.pagesResidentOnArrival, s.pagesWaited, s.pagesFailOpen,
+            s.pagesFetched, s.pageFailures, s.retries, s.waits10ms, s.waits100ms, s.waits1000ms,
+            s.maxWaitMs, s.longestStallRiddenMs, s.seeksInWindow, s.seeksOutOfWindow, s.evictions,
+            s.failOpenReads, s.workersAbandoned, s.filesRetained, s.pagesResidentNow);
 }
 
 CBlurayStreamCache::CView::CView(std::shared_ptr<CBlurayStreamCache> cache,
