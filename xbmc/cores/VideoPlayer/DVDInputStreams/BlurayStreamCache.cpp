@@ -225,18 +225,25 @@ std::shared_ptr<CBlurayStreamCache::CView> CBlurayStreamCache::OpenFile(const st
     return nullptr;
 
   int64_t length = 0;
+  bool everRead = false;
   {
     std::lock_guard<std::mutex> lock(m_cacheMutex);
     auto it = m_files.find(path);
     if (it != m_files.end())
+    {
       length = it->second->length;
+      everRead = it->second->everRead;
+    }
   }
 
-  if (length != 0)
+  if (length != 0 && !everRead)
   {
-    // Already known, which means a prime has been here: its head is resident
-    // and nothing has to be opened. THIS is the adoption - the blocking
-    // CFile::Open at a clip boundary simply does not happen.
+    // No open is needed either way once the length is known, but only a file
+    // no reader has touched is an adopted PRIME. A clip that was played and
+    // closed also has its length, and re-opening it for a back-seek across
+    // the seam is retention doing its job - counting that as an adoption made
+    // the prime figures self-contradictory: a disc whose playlists are all
+    // single-clip reported 1 started / 1 adopted / 1 dropped.
     std::lock_guard<std::mutex> lock(m_statsMutex);
     ++m_stats.primesAdopted;
   }
