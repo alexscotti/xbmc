@@ -243,6 +243,10 @@ private:
     // consumed instead of re-walking the window.
     int64_t lastReadEndPage{-1};
     int64_t prefetchHorizon{-1};
+    // Has a reader ever read from this file? A primed clip that has not been
+    // adopted yet has not; a clip that was played and closed has. That one
+    // bit separates the two for eviction without any extra bookkeeping.
+    bool everRead{false};
   };
 
   struct Work
@@ -267,15 +271,25 @@ private:
                               size_t size,
                               bool& shortPage);
 
-  // `prime` inserts at the COLD end of the LRU instead of the hot end: an
-  // unadopted prime is then evicted before the forward window it would
-  // otherwise push out, which is the eviction order the design asks for
-  // without a second mechanism. Reading it moves it to the hot end as usual.
   void InsertPageUnlocked(const std::shared_ptr<FileState>& file,
                           int64_t pageIndex,
                           const uint8_t* data,
                           size_t validBytes,
                           bool prime = false);
+
+  // What a resident page is worth when the arena is full. Ranked, lowest
+  // evicted first: a back-seek is rare, so what the reader has already passed
+  // goes before a prime, and the prime goes before the window the reader is
+  // about to walk into. Computed at eviction time from the read head rather
+  // than tracked, so a page that changes category - a prime once it is being
+  // read, a window page once the reader passes it - needs no bookkeeping.
+  enum class PageClass
+  {
+    Behind = 0, // the reader has gone past it
+    Prime = 1,  // a clip nobody is reading yet
+    Window = 2, // ahead of the reader in the file being read
+  };
+  PageClass ClassifyUnlocked(const FileState* file, int64_t pageIndex) const;
   void TouchPageUnlocked(FileState& file, int64_t pageIndex);
   bool ReclaimPageUnlocked(uint8_t*& page);
   void QueueForwardWindow(const std::shared_ptr<FileState>& file, int64_t lastPage);
@@ -329,6 +343,9 @@ private:
   unsigned int m_abandoned{0};
 
   std::atomic<bool> m_aborted{false};
+  // Pages held back from the window for an in-flight prime, so the window
+  // cannot oversubscribe the arena and evict the prime it is waiting for.
+  size_t m_primeReservePages{0};
 
   mutable std::mutex m_hintMutex;
   std::string m_hintCurrent;

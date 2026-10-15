@@ -408,6 +408,52 @@ TEST_F(BlurayStreamCacheTest, RepublishingTheHintDropsAPrimeNoLongerNext)
   EXPECT_GE(cache->GetStats().primesDropped, 1u);
 }
 
+TEST_F(BlurayStreamCacheTest, APrimeSurvivesTheWindowsOwnEvictionPressure)
+{
+  AddFile("clipA", 18, 60);
+  FakeFile* second = AddFile("clipB", 19, 12);
+
+  // A deliberately small arena, so the forward window has to evict to keep
+  // filling. The window must be sized to leave the prime room: without that
+  // reserve it oversubscribes the arena and evicts the prime it is competing
+  // with, and chaining stops working exactly when the disc needs it.
+  CBlurayStreamCache::Config config = Config(16);
+  config.behindBytes = 2 * PAGE;
+  config.nextLeadBytes = 50 * PAGE;
+  config.nextSizeBytes = 4 * PAGE;
+
+  auto cache = CBlurayStreamCache::Claim(config, Factory());
+  ASSERT_NE(cache, nullptr);
+  auto viewA = cache->OpenFile("clipA");
+  ASSERT_NE(viewA, nullptr);
+  cache->SetChainHint("clipA", "clipB");
+
+  std::vector<uint8_t> buffer(6144);
+  for (int i = 0; i < 200; ++i) // far enough in to trigger the prime
+    viewA->Read(buffer.data(), buffer.size());
+  std::this_thread::sleep_for(std::chrono::milliseconds(250));
+  ASSERT_GT(cache->GetStats().primePagesFetched, 0u);
+
+  for (int i = 0; i < 500; ++i) // and now make the window evict, hard
+    viewA->Read(buffer.data(), buffer.size());
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  EXPECT_GT(cache->GetStats().evictions, 0u) << "the test is not applying any pressure";
+
+  const int opensBefore = second->opens.load();
+  const int readsBefore = second->reads.load();
+  auto viewB = cache->OpenFile("clipB");
+  ASSERT_NE(viewB, nullptr);
+  const auto before = cache->GetStats();
+  const int64_t n = viewB->Read(buffer.data(), buffer.size());
+  const auto after = cache->GetStats();
+
+  ASSERT_GT(n, 0);
+  EXPECT_TRUE(Matches(buffer, static_cast<size_t>(n), second->id, 0));
+  EXPECT_EQ(second->opens.load(), opensBefore);
+  EXPECT_EQ(second->reads.load(), readsBefore) << "the prime was evicted by the window";
+  EXPECT_EQ(after.readsWaited, before.readsWaited);
+}
+
 TEST_F(BlurayStreamCacheTest, OnlyOneSessionAtATimeGetsTheArena)
 {
   AddFile("clip", 9, 8);

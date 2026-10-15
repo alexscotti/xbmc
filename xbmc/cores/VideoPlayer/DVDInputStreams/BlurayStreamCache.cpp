@@ -140,9 +140,18 @@ bool CBlurayStreamCache::AllocateArena()
     m_freePages.push_back(m_arena + i * m_config.pageSize);
 
   const size_t behindPages = m_config.behindBytes / m_config.pageSize;
-  // The window has to leave room for what is kept behind, or it evicts the
-  // pages it just fetched and every one of them is read twice.
-  m_windowPages = m_pageCount > (behindPages + 1) ? m_pageCount - behindPages - 1 : 1;
+  // The window has to leave room for what is kept behind AND for a prime in
+  // flight, or it oversubscribes the arena: it would then evict to make room
+  // for itself, and the prime - which no reader has touched yet - is the
+  // first thing it would take, so chaining would quietly stop working at
+  // exactly the moment it matters.
+  m_primeReservePages =
+      (m_config.nextSizeBytes + m_config.pageSize - 1) / m_config.pageSize;
+  const size_t reserved = behindPages + m_primeReservePages + 1;
+  m_windowPages = m_pageCount > reserved ? m_pageCount - reserved : 1;
+  CLog::Log(LOGDEBUG,
+            "CBlurayStreamCache - {} pages: {} window, {} behind, {} reserved for a prime",
+            m_pageCount, m_windowPages, behindPages, m_primeReservePages);
   return true;
 }
 
@@ -356,6 +365,10 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
   const size_t wanted = static_cast<size_t>(
       std::min<int64_t>(static_cast<int64_t>(size), file->length - offset));
 
+  {
+    std::lock_guard<std::mutex> lock(m_cacheMutex);
+    file->everRead = true;
+  }
   {
     std::lock_guard<std::mutex> lock(m_statsMutex);
     ++m_stats.reads;
@@ -607,27 +620,86 @@ bool CBlurayStreamCache::ReclaimPageUnlocked(uint8_t*& page)
     return true;
   }
 
-  // Least recently used, which is the eviction order the design asks for
-  // without a second mechanism: pages behind the reader - and a closed clip's
-  // retained pages - are the ones that stopped being touched, while the
-  // forward window was only just filled.
-  while (!m_lru.empty())
+  // Lowest class first, and least recently used within a class. Plain LRU is
+  // not enough here: it would take the prime (never touched, so always
+  // oldest) ahead of a behind page nobody will read again, and within the
+  // window it would take the EARLIEST fetched page, which is the one nearest
+  // the reader - the worst of the lot.
+  auto victim = m_lru.end();
+  auto best = PageClass::Window;
+  int64_t bestDistance = -1;
+
+  for (auto it = m_lru.begin(); it != m_lru.end(); ++it)
   {
-    auto victim = m_lru.back();
-    FileState* file = victim.first;
-    auto fileIt = file->pages.find(victim.second);
-    m_lru.pop_back();
-    if (fileIt == file->pages.end())
+    const FileState* file = it->first;
+    if (file->pages.find(it->second) == file->pages.end())
+      continue; // stale list entry
+
+    const PageClass cls = ClassifyUnlocked(file, it->second);
+    if (victim == m_lru.end() || cls < best)
+    {
+      victim = it;
+      best = cls;
+      bestDistance = it->second;
+      continue;
+    }
+    if (cls != best)
       continue;
 
-    page = fileIt->second.data;
-    file->pages.erase(fileIt);
-    std::lock_guard<std::mutex> lock(m_statsMutex);
-    ++m_stats.evictions;
-    return true;
+    // Within a class: for the window, the page FARTHEST ahead of the reader,
+    // since the reader reaches it last. For the others, list order already
+    // puts the least recently used at the back, so keep walking to it.
+    if (cls == PageClass::Window)
+    {
+      if (it->second > bestDistance)
+      {
+        victim = it;
+        bestDistance = it->second;
+      }
+    }
+    else
+    {
+      victim = it;
+      bestDistance = it->second;
+    }
   }
 
-  return false;
+  if (victim == m_lru.end())
+    return false;
+
+  FileState* file = victim->first;
+  auto fileIt = file->pages.find(victim->second);
+  if (fileIt == file->pages.end())
+    return false;
+
+  page = fileIt->second.data;
+  file->pages.erase(fileIt);
+  m_lru.erase(victim);
+  {
+    std::lock_guard<std::mutex> lock(m_statsMutex);
+    ++m_stats.evictions;
+  }
+  return true;
+}
+
+CBlurayStreamCache::PageClass CBlurayStreamCache::ClassifyUnlocked(const FileState* file,
+                                                                  int64_t pageIndex) const
+{
+  // The read head, without taking m_headMutex: this runs under m_cacheMutex
+  // and the head is only ever advanced by a reader, so a stale read of it
+  // costs a slightly wrong eviction choice and nothing else.
+  const FileState* head = m_headFile.get();
+  if (!head || file != head)
+  {
+    // Another file: either a clip being primed that nobody has read yet, or
+    // one that was played and closed, whose pages are only still here to
+    // serve a back-seek across the seam. The latter ranks with what is
+    // behind, because that is what it is.
+    return file->everRead ? PageClass::Behind : PageClass::Prime;
+  }
+
+  const int64_t headPage = m_headOffset / static_cast<int64_t>(m_config.pageSize);
+  return pageIndex < headPage ? PageClass::Behind : PageClass::Window;
 }
 
 void CBlurayStreamCache::QueueForwardWindow(const std::shared_ptr<FileState>& file, int64_t lastPage)
