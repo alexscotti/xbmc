@@ -27,6 +27,13 @@
 #include <queue>
 #include <vector>
 
+// A C++ header, so it belongs OUTSIDE the extern "C" block below: anything
+// with a template in it (and this one now reaches <unordered_set> through
+// BlurayStreamCache.h) fails to compile as "template with C linkage". It has
+// always been in the wrong place; it only started to matter once it pulled a
+// standard container in behind it.
+#include "DVDInputStreamFile.h"
+
 extern "C"
 {
 #include <libbluray/bluray.h>
@@ -34,7 +41,6 @@ extern "C"
 #include <libbluray/keys.h>
 #include <libbluray/overlay.h>
 #include <libbluray/player_settings.h>
-#include "DVDInputStreamFile.h"
 }
 
 #define MAX_PLAYLIST_ID 99999
