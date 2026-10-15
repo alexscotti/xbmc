@@ -166,6 +166,16 @@ public:
     uint64_t pagesWaited{0};
     uint64_t pagesFailOpen{0};
 
+    // WHERE the waits happen. A sequential title should wait essentially once
+    // - its very first read - and never again: a clip boundary is covered by
+    // the prime, and the forward window covers the rest. Cumulative totals
+    // cannot tell "one per clip boundary" from a real ongoing shortfall, and
+    // those have different fixes, so each wait is attributed.
+    uint64_t waitsFirstReadOfTitle{0};
+    uint64_t waitsFirstReadOfFile{0};  // a clip the prime did not cover
+    uint64_t waitsAfterSeek{0};        // the read was not sequential
+    uint64_t waitsSequential{0};       // mid-run: the window fell behind
+
     // what the worker did
     uint64_t pagesFetched{0};
     uint64_t pageFailures{0};

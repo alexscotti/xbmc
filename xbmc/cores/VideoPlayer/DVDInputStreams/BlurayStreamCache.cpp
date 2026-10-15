@@ -383,8 +383,12 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
   const size_t wanted = static_cast<size_t>(
       std::min<int64_t>(static_cast<int64_t>(size), file->length - offset));
 
+  bool fileHadBeenRead = false;
+  int64_t anchorBefore = -1;
   {
     std::lock_guard<std::mutex> lock(m_cacheMutex);
+    fileHadBeenRead = file->everRead;
+    anchorBefore = file->lastReadEndPage;
     file->everRead = true;
   }
   {
@@ -484,6 +488,17 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
         readWaited = true;
         const uint64_t ms = static_cast<uint64_t>(std::max<int64_t>(0, NowMs() - waitStart));
         std::lock_guard<std::mutex> statsLock(m_statsMutex);
+        // Attribute it. anchorBefore is this file's sequential position as it
+        // was when the read started, so the classification is not confused by
+        // the window update that follows.
+        if (!fileHadBeenRead)
+          (m_stats.reads <= 1 ? m_stats.waitsFirstReadOfTitle
+                              : m_stats.waitsFirstReadOfFile) += 1;
+        else if (anchorBefore < 0 || PageOf(offset) < anchorBefore ||
+                 PageOf(offset) > anchorBefore + 1)
+          ++m_stats.waitsAfterSeek;
+        else
+          ++m_stats.waitsSequential;
         m_stats.longestStallRiddenMs = std::max(m_stats.longestStallRiddenMs, ms);
         if (ms >= 10)
           ++m_stats.waits10ms;
@@ -1146,13 +1161,16 @@ void CBlurayStreamCache::LogStats(const char* reason)
             "({} failed, {} retries) | waits >=10ms {} >=100ms {} >=1s {}, max {} ms, longest "
             "stall ridden {} ms | seeks {} in window / {} out | {} evictions, {} fail-open reads, "
             "{} workers abandoned | primes {} started / {} adopted / {} dropped, {} pages | "
+            "waits: {} first-of-title, {} first-of-clip, {} after-seek, {} sequential | "
             "{} files retained, {} pages resident",
             reason, s.bytesAhead / (1024 * 1024), s.coverMs, s.reads, s.readsWaited, s.bytes,
             s.pagesRequested, s.pagesResidentOnArrival, s.pagesWaited, s.pagesFailOpen,
             s.pagesFetched, s.pageFailures, s.retries, s.waits10ms, s.waits100ms, s.waits1000ms,
             s.maxWaitMs, s.longestStallRiddenMs, s.seeksInWindow, s.seeksOutOfWindow, s.evictions,
             s.failOpenReads, s.workersAbandoned, s.primesStarted, s.primesAdopted,
-            s.primesDropped, s.primePagesFetched, s.filesRetained, s.pagesResidentNow);
+            s.primesDropped, s.primePagesFetched, s.waitsFirstReadOfTitle,
+            s.waitsFirstReadOfFile, s.waitsAfterSeek, s.waitsSequential, s.filesRetained,
+            s.pagesResidentNow);
 }
 
 CBlurayStreamCache::CView::CView(std::shared_ptr<CBlurayStreamCache> cache,
