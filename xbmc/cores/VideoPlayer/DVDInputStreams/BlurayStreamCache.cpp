@@ -255,8 +255,26 @@ std::shared_ptr<CBlurayStreamCache::CView> CBlurayStreamCache::OpenFile(const st
     // the seam is retention doing its job - counting that as an adoption made
     // the prime figures self-contradictory: a disc whose playlists are all
     // single-clip reported 1 started / 1 adopted / 1 dropped.
-    std::lock_guard<std::mutex> lock(m_statsMutex);
-    ++m_stats.primesAdopted;
+    {
+      std::lock_guard<std::mutex> lock(m_statsMutex);
+      ++m_stats.primesAdopted;
+    }
+
+    // Arm the forward window NOW instead of waiting for the anchor rule's
+    // second read. The anchor rule exists so read-ahead does not run off
+    // behind libbluray's index/clpi lookups, and those are never primed - a
+    // primed clip is by construction the next thing to be read sequentially
+    // from its start - so the protection is not needed here, and the delay
+    // costs a wait at the boundary: 6 of them in a 12-minute run, measured,
+    // even with 8 of 8 primes adopted.
+    std::shared_ptr<FileState> armed;
+    {
+      std::lock_guard<std::mutex> lock(m_cacheMutex);
+      armed = GetFileUnlocked(path);
+      if (armed->lastReadEndPage < 0)
+        armed->lastReadEndPage = 0;
+    }
+    QueueForwardWindow(armed, 0);
   }
 
   if (length == 0)
@@ -384,11 +402,14 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
       std::min<int64_t>(static_cast<int64_t>(size), file->length - offset));
 
   bool fileHadBeenRead = false;
+  bool filePrimed = false;
   int64_t anchorBefore = -1;
   {
     std::lock_guard<std::mutex> lock(m_cacheMutex);
     fileHadBeenRead = file->everRead;
     anchorBefore = file->lastReadEndPage;
+    // Resident pages on a file no reader has touched can only be a prime's.
+    filePrimed = !file->everRead && !file->pages.empty();
     file->everRead = true;
   }
   {
@@ -492,8 +513,18 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
         // was when the read started, so the classification is not confused by
         // the window update that follows.
         if (!fileHadBeenRead)
-          (m_stats.reads <= 1 ? m_stats.waitsFirstReadOfTitle
-                              : m_stats.waitsFirstReadOfFile) += 1;
+        {
+          if (m_stats.reads <= 1)
+            ++m_stats.waitsFirstReadOfTitle;
+          else
+          {
+            ++m_stats.waitsFirstReadOfFile;
+            if (filePrimed)
+              ++m_stats.waitsFirstReadPrimed;
+            else
+              ++m_stats.waitsFirstReadUnprimed;
+          }
+        }
         else if (anchorBefore < 0 || PageOf(offset) < anchorBefore ||
                  PageOf(offset) > anchorBefore + 1)
           ++m_stats.waitsAfterSeek;
@@ -1164,7 +1195,8 @@ void CBlurayStreamCache::LogStats(const char* reason)
             "({} failed, {} retries) | waits >=10ms {} >=100ms {} >=1s {}, max {} ms, longest "
             "stall ridden {} ms | seeks {} in window / {} out | {} evictions, {} fail-open reads, "
             "{} workers abandoned | primes {} started / {} adopted / {} dropped, {} pages | "
-            "waits: {} first-of-title, {} first-of-clip, {} after-seek, {} sequential | "
+            "waits: {} first-of-title, {} first-of-clip ({} primed / {} unprimed), "
+            "{} after-seek, {} sequential | "
             "{} files retained, {} pages resident",
             reason, s.headFile.empty() ? "-" : s.headFile.c_str(),
             s.headOffset / (1024 * 1024), s.bytesAhead / (1024 * 1024), s.coverMs, s.reads,
@@ -1174,7 +1206,8 @@ void CBlurayStreamCache::LogStats(const char* reason)
             s.maxWaitMs, s.longestStallRiddenMs, s.seeksInWindow, s.seeksOutOfWindow, s.evictions,
             s.failOpenReads, s.workersAbandoned, s.primesStarted, s.primesAdopted,
             s.primesDropped, s.primePagesFetched, s.waitsFirstReadOfTitle,
-            s.waitsFirstReadOfFile, s.waitsAfterSeek, s.waitsSequential, s.filesRetained,
+            s.waitsFirstReadOfFile, s.waitsFirstReadPrimed, s.waitsFirstReadUnprimed,
+            s.waitsAfterSeek, s.waitsSequential, s.filesRetained,
             s.pagesResidentNow);
 }
 

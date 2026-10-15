@@ -382,7 +382,12 @@ TEST_F(BlurayStreamCacheTest, ThePrimedNextClipCostsNoOpenAndNoWaitAtTheBoundary
   ASSERT_GT(n, 0);
   EXPECT_TRUE(Matches(buffer, static_cast<size_t>(n), second->id, 0));
   EXPECT_EQ(after.readsWaited, before.readsWaited);
-  EXPECT_EQ(second->reads.load(), readsAfterPrime);
+  // Deliberately NOT "no new source read": adopting a prime arms the forward
+  // window at once, so the worker legitimately starts fetching ahead in this
+  // clip. What must not happen is a source OPEN on the reader's thread - that
+  // is the part that blocks on a stalled share.
+  EXPECT_EQ(second->opens.load(), opensAfterPrime);
+  EXPECT_GE(second->reads.load(), readsAfterPrime);
   EXPECT_GE(after.primesAdopted, 1u);
 }
 
@@ -450,8 +455,8 @@ TEST_F(BlurayStreamCacheTest, APrimeSurvivesTheWindowsOwnEvictionPressure)
   ASSERT_GT(n, 0);
   EXPECT_TRUE(Matches(buffer, static_cast<size_t>(n), second->id, 0));
   EXPECT_EQ(second->opens.load(), opensBefore);
-  EXPECT_EQ(second->reads.load(), readsBefore) << "the prime was evicted by the window";
-  EXPECT_EQ(after.readsWaited, before.readsWaited);
+  EXPECT_EQ(after.readsWaited, before.readsWaited)
+      << "the prime was evicted by the window it was competing with";
 }
 
 TEST_F(BlurayStreamCacheTest, OnlyOneSessionAtATimeGetsTheArena)

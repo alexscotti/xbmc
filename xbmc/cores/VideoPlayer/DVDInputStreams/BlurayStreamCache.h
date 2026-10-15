@@ -173,6 +173,11 @@ public:
     // those have different fixes, so each wait is attributed.
     uint64_t waitsFirstReadOfTitle{0};
     uint64_t waitsFirstReadOfFile{0};  // a clip the prime did not cover
+    // Split of the above: was that clip primed at all? "primed but still
+    // waited" and "never primed" need different fixes, and guessing which
+    // dominates has already cost a build cycle.
+    uint64_t waitsFirstReadPrimed{0};
+    uint64_t waitsFirstReadUnprimed{0};
     uint64_t waitsAfterSeek{0};        // the read was not sequential
     uint64_t waitsSequential{0};       // mid-run: the window fell behind
 
