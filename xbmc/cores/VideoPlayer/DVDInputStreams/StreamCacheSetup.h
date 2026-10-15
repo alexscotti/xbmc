@@ -38,6 +38,12 @@ CBlurayStreamCache::Config ConfigFromSettings();
 // small, read once, and left direct.
 bool IsCacheableClip(const std::string& relPath);
 
+// A single video file that should get read-ahead in place of CFileCache. Just
+// .mkv to begin with - the request was .mkv, and every other container on the
+// shelf plays as a BDMV folder - but this is the one list to extend when .ts,
+// .m2ts-as-a-file or .mp4 are wanted too.
+bool IsCacheableSingleFile(const std::string& path);
+
 // Claims the arena for one session, or returns nullptr - the settings have it
 // off, the path is local, or another session already holds it. A nullptr is
 // not an error: the caller reads directly, exactly as it does without this.

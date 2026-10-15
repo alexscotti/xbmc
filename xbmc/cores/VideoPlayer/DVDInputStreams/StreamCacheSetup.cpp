@@ -170,6 +170,11 @@ bool IsCacheableClip(const std::string& relPath)
   return StringUtils::EndsWithNoCase(path.substr(0, slash), "BDMV/STREAM");
 }
 
+bool IsCacheableSingleFile(const std::string& path)
+{
+  return StringUtils::EndsWithNoCase(path, ".mkv");
+}
+
 std::shared_ptr<CBlurayStreamCache> ClaimFor(const std::string& path)
 {
   // Every path out of here says why, at LOGINFO. Returning nullptr silently
