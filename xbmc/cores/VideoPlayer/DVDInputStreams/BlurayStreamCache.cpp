@@ -1153,17 +1153,29 @@ CBlurayStreamCache::Stats CBlurayStreamCache::GetStats() const
         }
       }
       stats.bytesAhead = static_cast<uint64_t>(ahead);
+
+      // Everything resident at or past the head, gaps included.
+      const int64_t headPage = headOffset / static_cast<int64_t>(m_config.pageSize);
+      int64_t total = 0;
+      for (const auto& entry : head->pages)
+        if (entry.first >= headPage)
+          total += static_cast<int64_t>(entry.second.validBytes);
+      stats.bytesAheadTotal = static_cast<uint64_t>(total);
     }
   }
 
   // At the rate this session has actually been read at, not an assumed
   // bitrate.
   const int64_t elapsed = NowMs() - m_startedMs;
-  if (elapsed > 0 && stats.bytes > 0 && stats.bytesAhead > 0)
+  if (elapsed > 0 && stats.bytes > 0)
   {
     const double bytesPerMs = static_cast<double>(stats.bytes) / static_cast<double>(elapsed);
     if (bytesPerMs > 0)
+    {
       stats.coverMs = static_cast<uint64_t>(static_cast<double>(stats.bytesAhead) / bytesPerMs);
+      stats.coverTotalMs =
+          static_cast<uint64_t>(static_cast<double>(stats.bytesAheadTotal) / bytesPerMs);
+    }
   }
 
   return stats;
@@ -1189,7 +1201,8 @@ void CBlurayStreamCache::LogStats(const char* reason)
   // numbers that matter can be grepped out of a run: cover first, because
   // that is what says an outage is survivable.
   CLog::Log(LOGINFO,
-            "CBlurayStreamCache::LogStats - {}: head {}@{} MB | cover {} MB / {} ms ahead | "
+            "CBlurayStreamCache::LogStats - {}: head {}@{} MB | cover {} MB / {} ms contiguous, "
+            "{} MB / {} ms resident | "
             "reads {} ({} waited, "
             "{} bytes) | pages {} requested = {} resident + {} waited + {} fail-open, {} fetched "
             "({} failed, {} retries) | waits >=10ms {} >=100ms {} >=1s {}, max {} ms, longest "
@@ -1199,7 +1212,8 @@ void CBlurayStreamCache::LogStats(const char* reason)
             "{} after-seek, {} sequential | "
             "{} files retained, {} pages resident",
             reason, s.headFile.empty() ? "-" : s.headFile.c_str(),
-            s.headOffset / (1024 * 1024), s.bytesAhead / (1024 * 1024), s.coverMs, s.reads,
+            s.headOffset / (1024 * 1024), s.bytesAhead / (1024 * 1024), s.coverMs,
+            s.bytesAheadTotal / (1024 * 1024), s.coverTotalMs, s.reads,
             s.readsWaited, s.bytes,
             s.pagesRequested, s.pagesResidentOnArrival, s.pagesWaited, s.pagesFailOpen,
             s.pagesFetched, s.pageFailures, s.retries, s.waits10ms, s.waits100ms, s.waits1000ms,

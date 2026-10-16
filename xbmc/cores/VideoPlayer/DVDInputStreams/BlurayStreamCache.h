@@ -212,6 +212,14 @@ public:
     // hit rate can, because a page fetched just in time counts as a hit.
     uint64_t bytesAhead{0};
     uint64_t coverMs{0};
+    // bytesAhead above is the CONTIGUOUS run from the head, which is what a
+    // reader can consume without a gap. On its own it is misleading: a player
+    // that reads two regions at once (measured at fetched/read = 0.49x on The
+    // Conversation) leaves the resident set fragmented, and the contiguous run
+    // then reports 24 MB while all 256 pages of the arena are resident. These
+    // two say how much is really held, so a full arena can never look empty.
+    uint64_t bytesAheadTotal{0}; // resident bytes at or past the head, gaps and all
+    uint64_t coverTotalMs{0};
     // Where the reader actually is. Without this the log cannot distinguish a
     // reader advancing through a file from one re-reading the same region, and
     // those produce identical read/byte counts with very different fetch
