@@ -55,6 +55,9 @@ public:
 protected:
   virtual void VideoParamsChange() = 0;
   virtual void GetDebugInfo(std::string &audio, std::string &video, std::string &general) = 0;
+  /*! \brief Read-ahead cache state for its own overlay row, empty when the
+   stream has no cache. */
+  virtual std::string GetReadAheadDebugInfo() { return {}; }
   virtual void UpdateClockSync(bool enabled) = 0;
   virtual void UpdateRenderInfo(CRenderInfo &info) = 0;
   virtual void UpdateRenderBuffers(int queued, int discard, int free) = 0;

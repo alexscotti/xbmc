@@ -1228,21 +1228,19 @@ std::string CBlurayStreamCache::GetOverlayLine()
   const uint64_t slow = s.waits100ms;
   // snprintf, not StringUtils::Format: everything in this file is kept free of
   // the rest of Kodi so the class stays testable against a fake source.
-  char buf[320];
-  std::snprintf(buf, sizeof(buf),
-                "RA: %lluMB/%.1fs held @%.0fMbit/s | hit %.3f%% | miss %llu (%llu first, "
-                "%llu clip, %llu seek, %llu seq) | slow %llu max %llums | primes %llu/%llu",
+  //
+  // Compact on purpose. This sits on the player's format line beside the
+  // codec, aspect and bitrate, which is already long on a 4K DV title, so it
+  // carries only what is worth reading at a glance: how much is held, what
+  // that is worth in seconds at the current rate, the hit rate, and the waits
+  // that actually cost something (>=100 ms - about nine in ten waits are
+  // sub-10 ms brushes against a page already in flight). The full breakdown
+  // stays in the log line.
+  char buf[128];
+  std::snprintf(buf, sizeof(buf), "RA %lluMB/%.0fs %.2f%%%s",
                 static_cast<unsigned long long>(s.bytesAheadTotal / (1024 * 1024)),
-                s.coverTotalMs / 1000.0, s.rateBytesPerSec * 8.0 / 1e6, hit,
-                static_cast<unsigned long long>(s.pagesWaited + s.pagesFailOpen),
-                static_cast<unsigned long long>(s.waitsFirstReadOfTitle),
-                static_cast<unsigned long long>(s.waitsFirstReadOfFile),
-                static_cast<unsigned long long>(s.waitsAfterSeek),
-                static_cast<unsigned long long>(s.waitsSequential),
-                static_cast<unsigned long long>(slow),
-                static_cast<unsigned long long>(s.maxWaitMs),
-                static_cast<unsigned long long>(s.primesAdopted),
-                static_cast<unsigned long long>(s.primesStarted));
+                s.coverTotalMs / 1000.0, hit,
+                slow ? (" " + std::to_string(slow) + " slow").c_str() : "");
   std::string line(buf);
 
   std::lock_guard<std::mutex> lock(m_overlayMutex);

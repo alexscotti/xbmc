@@ -386,6 +386,13 @@ bool CPlayerGUIInfo::GetLabel(std::string& value,
           "{:.1f}", CServiceBroker::GetDataCacheCore().GetVideoLiveBitRate() / 1048576.0);
       value += " " + CServiceBroker::GetResourcesComponent().GetLocalizeStrings().Get(25020);
       return true;
+    case PLAYER_PROCESS_READAHEAD:
+    {
+      // Empty when the stream has no read-ahead cache, so a skin that shows
+      // this adds nothing to the line on paths without one.
+      value = CServiceBroker::GetDataCacheCore().GetReadAheadInfo();
+      return !value.empty();
+    }
     case PLAYER_PROCESS_VIDEO_QUEUE_LEVEL:
       value = std::to_string(CServiceBroker::GetDataCacheCore().GetVideoQueueLevel());
       return true;

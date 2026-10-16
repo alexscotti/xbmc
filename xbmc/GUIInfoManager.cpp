@@ -1252,6 +1252,7 @@ constexpr std::array<InfoMap, 21> player_process = {{
     {"audioqueuedatalevel", PLAYER_PROCESS_AUDIO_QUEUE_DATA_LEVEL},
     {"audiodialnorm",       PLAYER_PROCESS_AUDIO_DIALNORM},
     {"videolivebitrate",    PLAYER_PROCESS_VIDEO_LIVE_BITRATE},
+    {"readahead",           PLAYER_PROCESS_READAHEAD},
     {"videoqueuelevel",     PLAYER_PROCESS_VIDEO_QUEUE_LEVEL},
     {"videoqueuedatalevel", PLAYER_PROCESS_VIDEO_QUEUE_DATA_LEVEL},
     {"videoscantype",       PLAYER_PROCESS_VIDEOSCANTYPE},

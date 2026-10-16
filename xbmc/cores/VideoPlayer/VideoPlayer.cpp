@@ -5533,15 +5533,6 @@ void CVideoPlayer::GetGeneralInfo(std::string& strGeneralInfo)
     }
 
     strGeneralInfo = StringUtils::Format("Player: a/v:{: 6.3f}, {}", dDiff, strBuf);
-
-    // Read-ahead cache state, when this stream has one. Its own line, so the
-    // existing Player row keeps its shape.
-    if (m_pInputStream)
-    {
-      const std::string ra = m_pInputStream->GetReadAheadInfo();
-      if (!ra.empty())
-        strGeneralInfo += "\n" + ra;
-    }
   }
 }
 
@@ -7934,6 +7925,8 @@ void CVideoPlayer::UpdatePlayState(double timeout)
   }
 
   XFILE::SCacheStatus status;
+  UpdateReadAheadInfo();
+
   if (m_pInputStream && m_pInputStream->GetCacheStatus(&status))
   {
     state.cache_bytes = status.forward;
@@ -8141,6 +8134,21 @@ void CVideoPlayer::GetDebugInfo(std::string &audio, std::string &video, std::str
   audio = m_VideoPlayerAudio->GetPlayerInfo();
   video = m_VideoPlayerVideo->GetPlayerInfo();
   GetGeneralInfo(general);
+}
+
+std::string CVideoPlayer::GetReadAheadDebugInfo()
+{
+  return m_pInputStream ? m_pInputStream->GetReadAheadInfo() : std::string();
+}
+
+void CVideoPlayer::UpdateReadAheadInfo()
+{
+  // Published to the data cache so the skin can show it through
+  // Player.Process(readahead) - the same route the bitrate on that line
+  // takes. Empty when the stream has no cache, so the line is unchanged
+  // with read-ahead off.
+  CServiceBroker::GetDataCacheCore().SetReadAheadInfo(
+      m_pInputStream ? m_pInputStream->GetReadAheadInfo() : std::string());
 }
 
 void CVideoPlayer::UpdateClockSync(bool enabled)

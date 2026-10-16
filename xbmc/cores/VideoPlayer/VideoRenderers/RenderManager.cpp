@@ -887,6 +887,7 @@ void CRenderManager::Render(bool clear, DWORD flags, DWORD alpha, bool gui)
         DEBUG_INFO_PLAYER info;
 
         m_playerPort->GetDebugInfo(info.audio, info.video, info.player);
+        info.readahead = m_playerPort->GetReadAheadDebugInfo();
 
         double refreshrate, clockspeed;
         int missedvblanks;

@@ -74,6 +74,11 @@ public:
   std::string GetAudioChannelsSink();
   void SetAudioDialNorm(std::string dialNorm);
   std::string GetAudioDialNorm();
+
+  /*! \brief One line of read-ahead cache state for the player info overlay,
+   or empty when the stream has no cache. */
+  void SetReadAheadInfo(std::string info);
+  std::string GetReadAheadInfo();
   void SetAudioSampleRate(int sampleRate);
   int GetAudioSampleRate();
   void SetAudioBitsPerSample(int bitsPerSample);
@@ -245,6 +250,7 @@ protected:
     float dar;
     bool m_isInterlaced;
     int liveBitRate;
+    std::string readAhead;
     int queueLevel;
     int queueDataLevel;
   } m_playerVideoInfo;

@@ -292,6 +292,20 @@ std::string CDataCacheCore::GetAudioDialNorm()
   return m_playerAudioInfo.dialNorm;
 }
 
+void CDataCacheCore::SetReadAheadInfo(std::string info)
+{
+  std::unique_lock lock(m_videoPlayerSection);
+
+  m_playerVideoInfo.readAhead = std::move(info);
+}
+
+std::string CDataCacheCore::GetReadAheadInfo()
+{
+  std::unique_lock lock(m_videoPlayerSection);
+
+  return m_playerVideoInfo.readAhead;
+}
+
 std::string CDataCacheCore::GetAudioChannels()
 {
   std::unique_lock lock(m_audioPlayerSection);
