@@ -22,6 +22,7 @@ public:
   int64_t Seek(int64_t offset, int whence) override;
   bool IsEOF() override;
   void Abort() override;
+  std::string GetReadAheadInfo() override;
   int64_t GetLength() override;
   BitstreamStats GetBitstreamStats() const override ;
   int GetBlockSize() override;

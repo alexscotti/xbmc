@@ -5533,6 +5533,15 @@ void CVideoPlayer::GetGeneralInfo(std::string& strGeneralInfo)
     }
 
     strGeneralInfo = StringUtils::Format("Player: a/v:{: 6.3f}, {}", dDiff, strBuf);
+
+    // Read-ahead cache state, when this stream has one. Its own line, so the
+    // existing Player row keeps its shape.
+    if (m_pInputStream)
+    {
+      const std::string ra = m_pInputStream->GetReadAheadInfo();
+      if (!ra.empty())
+        strGeneralInfo += "\n" + ra;
+    }
   }
 }
 

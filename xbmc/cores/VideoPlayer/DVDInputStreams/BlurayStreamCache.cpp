@@ -1164,21 +1164,101 @@ CBlurayStreamCache::Stats CBlurayStreamCache::GetStats() const
     }
   }
 
-  // At the rate this session has actually been read at, not an assumed
-  // bitrate.
-  const int64_t elapsed = NowMs() - m_startedMs;
-  if (elapsed > 0 && stats.bytes > 0)
+  // Divided by a ROLLING rate over the last 10-20 s, not the session mean.
+  double bytesPerMs = 0.0;
   {
-    const double bytesPerMs = static_cast<double>(stats.bytes) / static_cast<double>(elapsed);
-    if (bytesPerMs > 0)
+    const int64_t now = NowMs();
+    std::lock_guard<std::mutex> lock(m_rateMutex);
+    if (m_rateMarkMs == 0)
     {
-      stats.coverMs = static_cast<uint64_t>(static_cast<double>(stats.bytesAhead) / bytesPerMs);
-      stats.coverTotalMs =
-          static_cast<uint64_t>(static_cast<double>(stats.bytesAheadTotal) / bytesPerMs);
+      m_rateMarkMs = m_ratePrevMs = now;
+      m_rateMarkBytes = m_ratePrevBytes = stats.bytes;
     }
+    else if ((now - m_rateMarkMs) >= 10000)
+    {
+      // Rotate: the older mark is what the rate is measured from, so the
+      // window never collapses to zero right after a rotation.
+      m_ratePrevMs = m_rateMarkMs;
+      m_ratePrevBytes = m_rateMarkBytes;
+      m_rateMarkMs = now;
+      m_rateMarkBytes = stats.bytes;
+    }
+    const int64_t span = now - m_ratePrevMs;
+    if (span > 0 && stats.bytes >= m_ratePrevBytes)
+      bytesPerMs = static_cast<double>(stats.bytes - m_ratePrevBytes) / static_cast<double>(span);
+  }
+
+  // Before the first window closes, fall back to the session mean rather than
+  // report nothing.
+  if (bytesPerMs <= 0.0)
+  {
+    const int64_t elapsed = NowMs() - m_startedMs;
+    if (elapsed > 0 && stats.bytes > 0)
+      bytesPerMs = static_cast<double>(stats.bytes) / static_cast<double>(elapsed);
+  }
+
+  if (bytesPerMs > 0.0)
+  {
+    stats.rateBytesPerSec = static_cast<uint64_t>(bytesPerMs * 1000.0);
+    stats.coverMs = static_cast<uint64_t>(static_cast<double>(stats.bytesAhead) / bytesPerMs);
+    stats.coverTotalMs =
+        static_cast<uint64_t>(static_cast<double>(stats.bytesAheadTotal) / bytesPerMs);
   }
 
   return stats;
+}
+
+std::string CBlurayStreamCache::GetOverlayLine()
+{
+  {
+    std::lock_guard<std::mutex> lock(m_overlayMutex);
+    // 500 ms is well under human reading speed and keeps the page walk off
+    // the render path.
+    if (!m_overlayLine.empty() && (NowMs() - m_overlayAtMs) < 500)
+      return m_overlayLine;
+  }
+
+  const Stats s = GetStats();
+  const double hit = s.pagesRequested
+                         ? 100.0 * static_cast<double>(s.pagesResidentOnArrival) /
+                               static_cast<double>(s.pagesRequested)
+                         : 100.0;
+  // Waits are split because they are not equal: the sub-10ms ones are the
+  // reader brushing a page already in flight, and only the slow ones are felt.
+  const uint64_t slow = s.waits100ms;
+  // snprintf, not StringUtils::Format: everything in this file is kept free of
+  // the rest of Kodi so the class stays testable against a fake source.
+  char buf[320];
+  std::snprintf(buf, sizeof(buf),
+                "RA: %lluMB/%.1fs held @%.0fMbit/s | hit %.3f%% | miss %llu (%llu first, "
+                "%llu clip, %llu seek, %llu seq) | slow %llu max %llums | primes %llu/%llu",
+                static_cast<unsigned long long>(s.bytesAheadTotal / (1024 * 1024)),
+                s.coverTotalMs / 1000.0, s.rateBytesPerSec * 8.0 / 1e6, hit,
+                static_cast<unsigned long long>(s.pagesWaited + s.pagesFailOpen),
+                static_cast<unsigned long long>(s.waitsFirstReadOfTitle),
+                static_cast<unsigned long long>(s.waitsFirstReadOfFile),
+                static_cast<unsigned long long>(s.waitsAfterSeek),
+                static_cast<unsigned long long>(s.waitsSequential),
+                static_cast<unsigned long long>(slow),
+                static_cast<unsigned long long>(s.maxWaitMs),
+                static_cast<unsigned long long>(s.primesAdopted),
+                static_cast<unsigned long long>(s.primesStarted));
+  std::string line(buf);
+
+  std::lock_guard<std::mutex> lock(m_overlayMutex);
+  m_overlayLine = line;
+  m_overlayAtMs = NowMs();
+  return line;
+}
+
+void CBlurayStreamCache::GetCacheStatus(uint64_t& forward, uint64_t& maxforward,
+                                        uint32_t& currate)
+{
+  const Stats s = GetStats();
+  forward = s.bytesAheadTotal;
+  maxforward = m_arenaBytes;
+  const int64_t elapsed = NowMs() - m_startedMs;
+  currate = (elapsed > 0) ? static_cast<uint32_t>(s.bytes * 1000 / elapsed) : 0;
 }
 
 void CBlurayStreamCache::MaybeLogStats()

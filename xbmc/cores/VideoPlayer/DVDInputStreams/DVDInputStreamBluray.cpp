@@ -225,6 +225,33 @@ void CDVDInputStreamBluray::PublishChainHint(unsigned int playItem)
   m_fileSession->cache->SetChainHint(current, next);
 }
 
+std::string CDVDInputStreamBluray::GetReadAheadInfo()
+{
+  if (m_fileSession && m_fileSession->cache)
+    return m_fileSession->cache->GetOverlayLine();
+  return {};
+}
+
+bool CDVDInputStreamBluray::GetCacheStatus(XFILE::SCacheStatus* status)
+{
+  // The overlay's "forward:" fields come from here, and CFileCache - which
+  // normally fills them - is deliberately bypassed on this path, so without
+  // this they read empty while a 256 MB arena does the work.
+  if (!status || !m_fileSession || !m_fileSession->cache)
+    return false;
+
+  uint64_t forward = 0;
+  uint64_t maxforward = 0;
+  uint32_t currate = 0;
+  m_fileSession->cache->GetCacheStatus(forward, maxforward, currate);
+  status->forward = forward;
+  status->maxforward = maxforward;
+  status->currate = currate;
+  status->maxrate = 0;
+  status->lowrate = 0;
+  return true;
+}
+
 void CDVDInputStreamBluray::Abort()
 {
   m_hold = HOLD_EXIT;

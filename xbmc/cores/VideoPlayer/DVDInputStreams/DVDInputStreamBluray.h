@@ -124,6 +124,8 @@ public:
   int64_t ReadRaw(int64_t offset, uint8_t* buffer, size_t size);
   int64_t Seek(int64_t offset, int whence) override;
   void Abort() override;
+  std::string GetReadAheadInfo() override;
+  bool GetCacheStatus(XFILE::SCacheStatus* status) override;
   bool IsEOF() override;
   int64_t GetLength() override;
   int GetBlockSize() override { return 6144; }

@@ -197,6 +197,9 @@ public:
   virtual CURL GetURL();
   virtual ENextStream NextStream() { return NEXTSTREAM_NONE; }
   virtual void Abort() {}
+  /*! \brief One line of read-ahead state for the on-screen codec-info
+   overlay, or empty when this stream has no read-ahead cache. */
+  virtual std::string GetReadAheadInfo() { return {}; }
   virtual int GetBlockSize() { return 0; }
   virtual bool CanSeek() { return true; } //! @todo drop this
   virtual bool CanPause() { return false; }

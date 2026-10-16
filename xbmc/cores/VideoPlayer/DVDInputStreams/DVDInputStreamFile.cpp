@@ -32,6 +32,13 @@ CDVDInputStreamFile::~CDVDInputStreamFile()
   Close();
 }
 
+std::string CDVDInputStreamFile::GetReadAheadInfo()
+{
+  if (m_streamCache)
+    return m_streamCache->GetOverlayLine();
+  return {};
+}
+
 void CDVDInputStreamFile::Abort()
 {
   // Called when the player is tearing down. Every reader waiting on a page
@@ -200,6 +207,22 @@ int64_t CDVDInputStreamFile::GetLength()
 
 bool CDVDInputStreamFile::GetCacheStatus(XFILE::SCacheStatus *status)
 {
+  // Same reason as the Blu-ray path: CFileCache is bypassed when the stream
+  // cache is in front, so these come from it instead.
+  if (status && m_streamCache)
+  {
+    uint64_t forward = 0;
+    uint64_t maxforward = 0;
+    uint32_t currate = 0;
+    m_streamCache->GetCacheStatus(forward, maxforward, currate);
+    status->forward = forward;
+    status->maxforward = maxforward;
+    status->currate = currate;
+    status->maxrate = 0;
+    status->lowrate = 0;
+    return true;
+  }
+
   if (m_pFile && m_pFile->IoControl(IOControl::CACHE_STATUS, status) >= 0)
     return true;
   else

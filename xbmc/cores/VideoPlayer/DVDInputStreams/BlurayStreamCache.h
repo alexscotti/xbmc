@@ -142,6 +142,17 @@ public:
   bool IsAborted() const { return m_aborted; }
 
   void LogStats(const char* reason);
+
+  // One short line for the on-screen codec-info overlay: what is held, the
+  // hit rate, and the waits that actually cost something. Rate limited and
+  // cached, because the overlay redraws every frame while GetStats() walks
+  // the page map under the cache lock.
+  std::string GetOverlayLine();
+
+  // Fills the fields Kodi's player overlay already has for CFileCache, so
+  // "forward: ... / ...% / ...s" keeps working on a path where CFileCache is
+  // deliberately bypassed and would otherwise read as empty.
+  void GetCacheStatus(uint64_t& forward, uint64_t& maxforward, uint32_t& currate);
   // Logs the stats if it has been longer than the interval, so a long film
   // reports while it plays instead of only at the stop. Called off the read
   // path with no cache lock held.
@@ -220,6 +231,9 @@ public:
     // two say how much is really held, so a full arena can never look empty.
     uint64_t bytesAheadTotal{0}; // resident bytes at or past the head, gaps and all
     uint64_t coverTotalMs{0};
+    // The rate the cover seconds are divided by, so the figure can be
+    // checked rather than trusted.
+    uint64_t rateBytesPerSec{0};
     // Where the reader actually is. Without this the log cannot distinguish a
     // reader advancing through a file from one re-reading the same region, and
     // those produce identical read/byte counts with very different fetch
@@ -384,6 +398,22 @@ private:
 
   mutable std::mutex m_statsMutex;
   Stats m_stats;
+
+  std::mutex m_overlayMutex;
+  std::string m_overlayLine;
+  int64_t m_overlayAtMs{0};
+
+  // A ROLLING read rate, for the cover seconds. The cumulative mean since the
+  // session started is the wrong divisor: it includes menu and navigation time
+  // at a low or zero rate, so it understates the rate during the feature and
+  // overstates how many seconds the buffer is worth - most badly on exactly
+  // the high-bitrate passages where the answer matters. Two marks rotated
+  // every 10 s give a 10-20 s window.
+  mutable std::mutex m_rateMutex;
+  mutable int64_t m_rateMarkMs{0};
+  mutable uint64_t m_rateMarkBytes{0};
+  mutable int64_t m_ratePrevMs{0};
+  mutable uint64_t m_ratePrevBytes{0};
   int64_t m_startedMs{0};
   int64_t m_lastStatsLogMs{0};
 
