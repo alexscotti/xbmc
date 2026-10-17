@@ -132,7 +132,15 @@ public:
   // is actually playing. Republishing drops a prime that is no longer next
   // (an angle change, a navigation jump), so nothing stale is ever adopted.
   // An empty nextPath means "nothing follows": the end of the playlist.
-  void SetChainHint(const std::string& currentPath, const std::string& nextPath);
+  // nextOffset is where the next playitem begins in nextPath: 0 for the usual
+  // next clip, and that playitem's first source packet when it shares a clip
+  // with the current one. currentEndOffset is where the CURRENT playitem ends
+  // (-1 = at the end of the file), which is the boundary the lead is measured
+  // against - a same-clip seam is not an EOF.
+  void SetChainHint(const std::string& currentPath,
+                    const std::string& nextPath,
+                    int64_t nextOffset = 0,
+                    int64_t currentEndOffset = -1);
 
   // Returns every waiting reader at once and fails every pending read. Called
   // from CDVDInputStreamBluray::Abort() before the player waits for its
@@ -345,7 +353,7 @@ private:
   // Opens the next clip and pulls its head. Yields to window work at every
   // page boundary, so a 32 MB prime cannot hold the link while the clip being
   // watched drains.
-  void RunPrime(WorkerCtx& ctx, const std::string& path);
+  void RunPrime(WorkerCtx& ctx, const std::string& path, int64_t startOffset);
 
   void StartWorker();
   // Abandons the running worker if it has been stuck longer than the
@@ -379,7 +387,20 @@ private:
   std::condition_variable m_queueChanged;
   std::deque<Work> m_window;
   // Second class of work, always served after the window above.
-  std::deque<std::string> m_primes;
+  // A queued prime: which clip, and where in it to start. The start is 0 for
+  // the usual next-clip prime and the playitem's first packet for a same-clip
+  // seam, so the two share one queue and one worker path.
+  struct PrimeJob
+  {
+    std::string path;
+    int64_t offset{0};
+    bool operator==(const PrimeJob& other) const
+    {
+      return path == other.path && offset == other.offset;
+    }
+  };
+  static std::string PrimeKey(const std::string& path, int64_t offset);
+  std::deque<PrimeJob> m_primes;
   std::unordered_set<std::string> m_queued;
   std::thread m_worker;
   std::shared_ptr<WorkerCtx> m_workerCtx;
@@ -394,7 +415,17 @@ private:
   mutable std::mutex m_hintMutex;
   std::string m_hintCurrent;
   std::string m_hintNext;
-  std::string m_primeQueuedFor; // the clip the outstanding prime belongs to
+  int64_t m_hintNextOffset{0};   // where the next playitem starts in m_hintNext
+  int64_t m_hintCurrentEnd{-1};  // where the current playitem ends (-1 = EOF)
+  std::string m_primeQueuedFor;  // PrimeKey of the outstanding prime
+
+  // A same-clip prime is adopted by a READ landing in it, not by an open:
+  // libbluray seeks inside the clip it already has open, so the file_open
+  // adoption path never fires for one. Checked on every read, so the common
+  // case must cost nothing - these are read unlocked and only then confirmed
+  // under m_hintMutex.
+  std::atomic<bool> m_sameClipPrime{false};
+  std::atomic<int64_t> m_sameClipPrimeOffset{0};
 
   mutable std::mutex m_statsMutex;
   Stats m_stats;

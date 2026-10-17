@@ -245,7 +245,10 @@ std::shared_ptr<CBlurayStreamCache::CView> CBlurayStreamCache::OpenFile(const st
     // adopted and dropped (4 started / 3 adopted / 4 dropped on Sin City).
     {
       std::lock_guard<std::mutex> hintLock(m_hintMutex);
-      if (m_primeQueuedFor == path)
+      // A prime that libbluray OPENS is always a next-clip prime, which is
+      // queued at offset 0; a same-clip prime has no open and is adopted on
+      // the read instead.
+      if (m_primeQueuedFor == PrimeKey(path, 0))
         m_primeQueuedFor.clear();
     }
 
@@ -310,74 +313,121 @@ std::shared_ptr<CBlurayStreamCache::FileState> CBlurayStreamCache::GetFileUnlock
   return file;
 }
 
+std::string CBlurayStreamCache::PrimeKey(const std::string& path, int64_t offset)
+{
+  return path + "@" + std::to_string(offset);
+}
+
 void CBlurayStreamCache::SetChainHint(const std::string& currentPath,
-                                     const std::string& nextPath)
+                                     const std::string& nextPath,
+                                     int64_t nextOffset,
+                                     int64_t currentEndOffset)
 {
   std::string dropped;
   {
     std::lock_guard<std::mutex> lock(m_hintMutex);
-    if (m_hintCurrent == currentPath && m_hintNext == nextPath)
+    if (m_hintCurrent == currentPath && m_hintNext == nextPath &&
+        m_hintNextOffset == nextOffset && m_hintCurrentEnd == currentEndOffset)
       return;
 
     // A prime taken for a clip that is no longer next cannot be adopted, so
     // stop holding it: its pages are already at the cold end of the LRU and
     // will go first.
-    if (!m_primeQueuedFor.empty() && m_primeQueuedFor != nextPath)
+    const std::string wanted =
+        nextPath.empty() ? std::string() : PrimeKey(nextPath, nextOffset);
+    if (!m_primeQueuedFor.empty() && m_primeQueuedFor != wanted)
     {
       dropped = m_primeQueuedFor;
       m_primeQueuedFor.clear();
+      m_sameClipPrime.store(false);
     }
     m_hintCurrent = currentPath;
     m_hintNext = nextPath;
+    m_hintNextOffset = nextOffset;
+    m_hintCurrentEnd = currentEndOffset;
   }
 
   if (!dropped.empty())
   {
     {
       std::lock_guard<std::mutex> lock(m_queueMutex);
-      m_primes.erase(std::remove(m_primes.begin(), m_primes.end(), dropped), m_primes.end());
+      m_primes.erase(std::remove_if(m_primes.begin(), m_primes.end(),
+                                    [&dropped](const PrimeJob& job) {
+                                      return PrimeKey(job.path, job.offset) == dropped;
+                                    }),
+                     m_primes.end());
     }
     std::lock_guard<std::mutex> lock(m_statsMutex);
     ++m_stats.primesDropped;
   }
 
-  CLog::Log(LOGDEBUG, "CBlurayStreamCache - chain hint: {} -> {}",
-            NameOf(currentPath),
-            nextPath.empty() ? "(end of playlist)" : NameOf(nextPath));
+  if (!nextPath.empty() && nextPath == currentPath)
+    CLog::Log(LOGDEBUG,
+              "CBlurayStreamCache - chain hint: {} -> same clip, next playitem at {} MB",
+              NameOf(currentPath), nextOffset / (1024 * 1024));
+  else
+    CLog::Log(LOGDEBUG, "CBlurayStreamCache - chain hint: {} -> {}",
+              NameOf(currentPath),
+              nextPath.empty() ? "(end of playlist)" : NameOf(nextPath));
 }
 
 void CBlurayStreamCache::MaybeQueuePrime(const std::shared_ptr<FileState>& file, int64_t offset)
 {
   if (m_config.nextLeadBytes == 0 || m_config.nextSizeBytes == 0)
     return;
-  if (file->length <= 0 || (file->length - offset) > static_cast<int64_t>(m_config.nextLeadBytes))
+  if (file->length <= 0)
     return;
 
-  std::string next;
+  PrimeJob job;
+  bool sameClip = false;
   {
     std::lock_guard<std::mutex> lock(m_hintMutex);
     if (m_hintCurrent != file->path || m_hintNext.empty())
       return;
-    if (m_primeQueuedFor == m_hintNext)
+    // The lead is measured to the end of the CURRENT PLAYITEM, which is the
+    // end of the file only when the next playitem is in another clip. A
+    // same-clip seam sits mid-file, and measuring to EOF there would arm the
+    // prime minutes late - or never, on a playitem that ends far from EOF.
+    const int64_t boundary = (m_hintCurrentEnd > 0 && m_hintCurrentEnd <= file->length)
+                                 ? m_hintCurrentEnd
+                                 : file->length;
+    if (offset >= boundary || (boundary - offset) > static_cast<int64_t>(m_config.nextLeadBytes))
+      return;
+    job.path = m_hintNext;
+    job.offset = m_hintNextOffset;
+    const std::string key = PrimeKey(job.path, job.offset);
+    if (m_primeQueuedFor == key)
       return; // already queued or done
-    next = m_hintNext;
-    m_primeQueuedFor = next;
+    m_primeQueuedFor = key;
+    sameClip = (job.path == m_hintCurrent);
+    if (sameClip)
+    {
+      m_sameClipPrimeOffset.store(job.offset);
+      m_sameClipPrime.store(true);
+    }
   }
+  const std::string& next = job.path;
 
   {
     std::lock_guard<std::mutex> lock(m_queueMutex);
     if (m_stopWorker || m_aborted)
       return;
-    m_primes.push_back(next);
+    m_primes.push_back(job);
   }
   {
     std::lock_guard<std::mutex> lock(m_statsMutex);
     ++m_stats.primesStarted;
   }
   m_queueChanged.notify_one();
-  CLog::Log(LOGDEBUG, "CBlurayStreamCache - priming {} ({} MB) - {} MB left of {}",
-            NameOf(next), m_config.nextSizeBytes / (1024 * 1024),
-            (file->length - offset) / (1024 * 1024), NameOf(file->path));
+  if (sameClip)
+    CLog::Log(LOGDEBUG,
+              "CBlurayStreamCache - priming {} at {} MB (same clip, {} MB) - seam {} MB away",
+              NameOf(next), job.offset / (1024 * 1024),
+              m_config.nextSizeBytes / (1024 * 1024), (job.offset - offset) / (1024 * 1024));
+  else
+    CLog::Log(LOGDEBUG, "CBlurayStreamCache - priming {} ({} MB) - {} MB left of {}",
+              NameOf(next), m_config.nextSizeBytes / (1024 * 1024),
+              (file->length - offset) / (1024 * 1024), NameOf(file->path));
 }
 
 int64_t CBlurayStreamCache::ReadAt(const std::string& path,
@@ -400,6 +450,32 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
 
   const size_t wanted = static_cast<size_t>(
       std::min<int64_t>(static_cast<int64_t>(size), file->length - offset));
+
+  // A same-clip prime is adopted by a read reaching it. There is no file_open
+  // for one - libbluray seeks inside the clip it already has open - so the
+  // open-side adoption never fires and, without this, the next hint republish
+  // would find the prime still outstanding and count it DROPPED. The flag is
+  // false on every ordinary read, so this costs two relaxed loads.
+  if (m_sameClipPrime.load(std::memory_order_relaxed) &&
+      offset >= m_sameClipPrimeOffset.load(std::memory_order_relaxed))
+  {
+    bool adopted = false;
+    {
+      std::lock_guard<std::mutex> lock(m_hintMutex);
+      if (m_sameClipPrime.load() && path == m_hintNext &&
+          m_primeQueuedFor == PrimeKey(m_hintNext, m_hintNextOffset))
+      {
+        m_primeQueuedFor.clear();
+        m_sameClipPrime.store(false);
+        adopted = true;
+      }
+    }
+    if (adopted)
+    {
+      std::lock_guard<std::mutex> lock(m_statsMutex);
+      ++m_stats.primesAdopted;
+    }
+  }
 
   bool fileHadBeenRead = false;
   bool filePrimed = false;
@@ -943,10 +1019,10 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
     // the next one can be got ready.
     if (m_window.empty())
     {
-      const std::string prime = m_primes.front();
+      const PrimeJob prime = m_primes.front();
       m_primes.pop_front();
       lock.unlock();
-      RunPrime(ctx, prime);
+      RunPrime(ctx, prime.path, prime.offset);
       return true;
     }
 
@@ -1020,7 +1096,7 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
   return true;
 }
 
-void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const std::string& path)
+void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const std::string& path, int64_t startOffset)
 {
   ISource* source = GetWorkerSource(ctx, path);
   if (!source)
@@ -1040,15 +1116,30 @@ void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const std::string& path)
     file = GetFileUnlocked(path);
     // Published before any byte is read: from here libbluray's file_open of
     // this clip needs no open of its own.
-    file->length = length;
+    //
+    // Only when it is not known yet. A same-clip prime targets the file the
+    // reader is ALREADY reading, and readers consult length unlocked, so
+    // rewriting it here is a data race - TSan caught exactly that against
+    // QueuePage once same-clip priming made this reachable (2026-10-17). The
+    // value cannot differ: it is the same file.
+    if (file->length <= 0)
+      file->length = length;
   }
 
+  // A same-clip prime starts at the next playitem's first packet, not at 0.
+  const int64_t firstPage = (startOffset > 0)
+                                ? startOffset / static_cast<int64_t>(m_config.pageSize)
+                                : 0;
+  const int64_t lastPage = (length - 1) / static_cast<int64_t>(m_config.pageSize);
+  if (firstPage > lastPage)
+    return;
   const int64_t pages = std::min<int64_t>(
       static_cast<int64_t>((m_config.nextSizeBytes + m_config.pageSize - 1) / m_config.pageSize),
-      (length - 1) / static_cast<int64_t>(m_config.pageSize) + 1);
+      lastPage - firstPage + 1);
 
-  for (int64_t page = 0; page < pages; ++page)
+  for (int64_t n = 0; n < pages; ++n)
   {
+    const int64_t page = firstPage + n;
     if (ctx.cancel.load() || m_aborted)
       return;
 
@@ -1058,7 +1149,9 @@ void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const std::string& path)
       std::lock_guard<std::mutex> lock(m_queueMutex);
       if (!m_window.empty())
       {
-        m_primes.push_front(path);
+        // Resume where this prime got to, not where it began.
+        m_primes.push_front(
+            PrimeJob{path, page * static_cast<int64_t>(m_config.pageSize)});
         return;
       }
     }

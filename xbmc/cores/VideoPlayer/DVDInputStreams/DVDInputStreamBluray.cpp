@@ -211,18 +211,41 @@ void CDVDInputStreamBluray::PublishChainHint(unsigned int playItem)
   if (current.empty())
     return;
 
+  // An m2ts is a stream of 192-byte source packets, so a playitem's start
+  // packet is its byte offset in the clip.
+  constexpr int64_t SOURCE_PACKET_BYTES = 192;
+
   std::string next;
+  int64_t nextOffset = 0;
+  int64_t currentEnd = -1;
   if (playItem + 1 < m_titleInfo->clip_count)
   {
     next = clipPath(playItem + 1);
-    // One clip, many playitems - Gangs of New York's 00012.mpls, M3GAN 2.0's
-    // 28 items. The next read is then a seek inside a file that is already
-    // open and cached, so there is nothing to prime.
     if (next == current)
-      next.clear();
+    {
+      // One clip, many playitems - Gangs of New York's 00012.mpls, M3GAN 2.0's
+      // 28 items. The seam is not an open and not an EOF: it is a seek inside
+      // the clip already being read, to the next playitem's first packet.
+      const BLURAY_CLIP_INFO& playing = m_titleInfo->clips[playItem];
+      const BLURAY_CLIP_INFO& following = m_titleInfo->clips[playItem + 1];
+      nextOffset = static_cast<int64_t>(following.start_pkt) * SOURCE_PACKET_BYTES;
+      currentEnd = (static_cast<int64_t>(playing.start_pkt) +
+                    static_cast<int64_t>(playing.pkt_count)) * SOURCE_PACKET_BYTES;
+      // Most same-clip seams RUN ON: the next playitem begins exactly where
+      // this one ends, so the read never jumps and the forward window already
+      // holds the bytes. Measured on the library, every same-clip join on
+      // Gangs of New York is contiguous. Priming those would queue work for
+      // pages the window has, so only a seam that actually jumps is published.
+      if (nextOffset == currentEnd)
+      {
+        next.clear();
+        nextOffset = 0;
+        currentEnd = -1;
+      }
+    }
   }
 
-  m_fileSession->cache->SetChainHint(current, next);
+  m_fileSession->cache->SetChainHint(current, next, nextOffset, currentEnd);
 }
 
 std::string CDVDInputStreamBluray::GetReadAheadInfo()
