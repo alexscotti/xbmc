@@ -8,6 +8,8 @@
 
 #include "DVDClock.h"
 
+#include <atomic>
+
 #include "VideoReferenceClock.h"
 #include "cores/VideoPlayer/Interface/TimingConstants.h"
 #include "utils/MathUtils.h"
@@ -480,7 +482,35 @@ double CDVDClock::SystemToPlaying(int64_t system)
   else
     current = system;
 
-  return DVD_TIME_BASE * (double)(current - m_startClock + m_systemAdjust) / m_systemUsed + m_iDisc;
+  const double playing =
+      DVD_TIME_BASE * (double)(current - m_startClock + m_systemAdjust) / m_systemUsed + m_iDisc;
+
+  // Diagnostic for the 3D display-reset clock blowup. The symptom is
+  // "ActiveAE - large audio sync error: -1.419e10" followed by a player clock
+  // pinned at INT32_MAX and playback stuck, on 3D titles after an HDMI
+  // hotplug (four reproductions, 2026-10-16/17). -1.419e10 microseconds is
+  // 3.94 hours, i.e. `current` running that far ahead of m_startClock, but
+  // which term is wrong has been guessed at twice and got it wrong both
+  // times. Name the term instead. Rate limited to once a second so a flood
+  // cannot itself cost presentation time, and only above an hour, which no
+  // legitimate playback clock on this box reaches.
+  if (playing > 3600.0 * DVD_TIME_BASE)
+  {
+    static std::atomic<int64_t> lastLogged{0};
+    const int64_t nowMs = CurrentHostCounter() / (CurrentHostFrequency() / 1000);
+    int64_t prev = lastLogged.load();
+    if (nowMs - prev > 1000 && lastLogged.compare_exchange_strong(prev, nowMs))
+    {
+      CLog::Log(LOGWARNING,
+                "CDVDClock: implausible clock {:.0f} us ({:.2f} h) - current {} startClock {} "
+                "delta {} systemAdjust {} systemUsed {} iDisc {:.0f} refTime {}",
+                playing, playing / (3600.0 * DVD_TIME_BASE), current, m_startClock,
+                current - m_startClock, m_systemAdjust, m_systemUsed, m_iDisc,
+                m_videoRefClock ? m_videoRefClock->GetTime(false) : -1);
+    }
+  }
+
+  return playing;
 }
 
 double CDVDClock::GetClockSpeed() const

@@ -133,8 +133,22 @@ void CVideoReferenceClock::Process()
     // Carry the vblank timeline's offset into the systemclock fallback so
     // GetTime stays continuous through the teardown (and through the next
     // setup, which re-applies it).
+    const int64_t prevOffset = m_TimeOffset;
     m_TimeOffset = std::max(m_CurrTime, m_LastIntTime) - CurrentHostCounter();
     m_UseVblank = false;                       //we're back to using the systemclock
+    // The offset is carried across every vblank-clock restart, and a 3D
+    // display reset restarts it dozens of times in a session (39 stops in
+    // one run, measured). If each restart hands on a slightly larger offset
+    // the clock walks away, which is the remaining candidate for the 3.94 h
+    // clock behind the -1.419e10 audio sync error. Log what is carried so
+    // the term is named rather than guessed at.
+    // LOGWARNING, not LOGDEBUG: debug logging is off on this box by policy
+    // (forced debug logging is the confirmed cause of 250-1400 ms
+    // presentation stalls), so a LOGDEBUG diagnostic would never print.
+    CLog::Log(LOGWARNING,
+              "CVideoReferenceClock: vblank clock down - carrying offset {} (was {}, delta {}), "
+              "CurrTime {}",
+              m_TimeOffset, prevOffset, m_TimeOffset - prevOffset, m_CurrTime);
     SingleLock.unlock();
 
     //clean up the vblank clock
