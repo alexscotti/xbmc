@@ -18,6 +18,7 @@
 #include "windowing/WinSystem.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <mutex>
 
 // Bounds for a refreshrate the clock is willing to divide by. Nothing a
@@ -25,6 +26,9 @@
 // mid-mode-set, not a rate.
 namespace
 {
+// A vblank timestamp further than this from CurrentHostCounter() is not a
+// late vblank, it is a different clock source.
+constexpr int64_t MAX_VBLANK_TIME_SKEW_S = 60;
 constexpr double MIN_SANE_REFRESHRATE = 10.0;
 constexpr double MAX_SANE_REFRESHRATE = 1000.0;
 constexpr double FALLBACK_REFRESHRATE = 60.0;
@@ -74,7 +78,37 @@ void CVideoReferenceClock::UpdateClock(int NrVBlanks, uint64_t time)
 {
   std::unique_lock lock(m_CritSection);
 
-  m_VblankTime = time;
+  // The vblank timestamp must be in the SAME epoch as CurrentHostCounter():
+  // it becomes m_VblankTime, which GetTime() interpolates from and which the
+  // teardown turns into the offset carried across every restart.
+  //
+  // Measured on a 3D display reset (2026-10-17): a timestamp arrived
+  // ~14.19e15 ticks out - 164 days at this box's 1 GHz counter - while the
+  // clock's own base was a sane 18.8 minutes of uptime. The offset carried
+  // that epoch gap forward permanently, every later restart faithfully
+  // re-applied it, and the DVD clock the audio compares against read 3941
+  // hours. That is the -1.419e10 "large audio sync error" and the player
+  // clock pinned at INT32_MAX with playback stuck, on six 3D titles.
+  //
+  // A timestamp this far from the host counter is not a late vblank, it is a
+  // different clock source. Take the host counter instead; a slightly
+  // mistimed vblank costs one frame of bookkeeping, the bad epoch costs the
+  // session.
+  const int64_t now = CurrentHostCounter();
+  const int64_t supplied = static_cast<int64_t>(time);
+  const int64_t away = std::abs(supplied - now);
+  if (away > m_SystemFrequency * MAX_VBLANK_TIME_SKEW_S)
+  {
+    CLog::Log(LOGWARNING,
+              "CVideoReferenceClock: vblank timestamp {} is {} ticks from the host counter {} "
+              "- out of epoch, using the host counter",
+              supplied, away, now);
+    m_VblankTime = now;
+  }
+  else
+  {
+    m_VblankTime = time;
+  }
   UpdateClockInternal(NrVBlanks, true);
 }
 
@@ -135,6 +169,16 @@ void CVideoReferenceClock::Process()
     // setup, which re-applies it).
     const int64_t prevOffset = m_TimeOffset;
     m_TimeOffset = std::max(m_CurrTime, m_LastIntTime) - CurrentHostCounter();
+    // Second line of defence: never carry an offset that is itself out of
+    // epoch. Without this one corrupt timestamp poisons every subsequent
+    // restart, because each one re-anchors m_CurrTime = Now + m_TimeOffset.
+    if (std::abs(m_TimeOffset) > m_SystemFrequency * MAX_VBLANK_TIME_SKEW_S)
+    {
+      CLog::Log(LOGWARNING,
+                "CVideoReferenceClock: refusing to carry offset {} (out of epoch) - dropping it",
+                m_TimeOffset);
+      m_TimeOffset = 0;
+    }
     m_UseVblank = false;                       //we're back to using the systemclock
     // The offset is carried across every vblank-clock restart, and a 3D
     // display reset restarts it dozens of times in a session (39 stops in
