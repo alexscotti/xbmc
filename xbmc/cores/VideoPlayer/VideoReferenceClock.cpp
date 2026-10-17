@@ -20,6 +20,16 @@
 #include <algorithm>
 #include <mutex>
 
+// Bounds for a refreshrate the clock is willing to divide by. Nothing a
+// display presents is outside this, and a value outside it is a report taken
+// mid-mode-set, not a rate.
+namespace
+{
+constexpr double MIN_SANE_REFRESHRATE = 10.0;
+constexpr double MAX_SANE_REFRESHRATE = 1000.0;
+constexpr double FALLBACK_REFRESHRATE = 60.0;
+} // namespace
+
 CVideoReferenceClock::CVideoReferenceClock() : CThread("RefClock")
 {
   m_SystemFrequency = CurrentHostFrequency();
@@ -30,7 +40,7 @@ CVideoReferenceClock::CVideoReferenceClock() : CThread("RefClock")
   m_CurrTime = 0;
   m_LastIntTime = 0;
   m_CurrTimeFract = 0.0;
-  m_RefreshRate = 0.0;
+  m_RefreshRate = FALLBACK_REFRESHRATE; // never 0: every consumer divides by it
   m_MissedVblanks = 0;
   m_VblankTime = 0;
   m_vsyncStopEvent.Reset();
@@ -220,10 +230,30 @@ int64_t CVideoReferenceClock::GetTime(bool interpolated /* = true*/)
     Now = CurrentHostCounter();        //get current system time
     NextVblank = TimeOfNextVblank();   //get time when the next vblank should happen
 
-    while(Now >= NextVblank)  //keep looping until the next vblank is in the future
+    // Bounded. Each pass credits one missed vblank, so the count needed is
+    // (gap / vblank period); after a display reset the gap can be seconds,
+    // which is thousands of legitimate passes. The bound only has to stop the
+    // pathological case - a vblank period so small the loop can never catch
+    // up - and 4 seconds' worth at 1 kHz is far above any real catch-up.
+    int guard = 4000;
+    while (Now >= NextVblank && guard-- > 0)
     {
       UpdateClockInternal(1, false); //update clock when next vblank should have happened already
       NextVblank = TimeOfNextVblank(); //get time when the next vblank should happen
+    }
+    if (guard <= 0)
+    {
+      // The clock cannot be trusted after this: re-anchor on the system clock
+      // rather than hand the players an extrapolated value. Seen as a player
+      // clock pinned at INT32_MAX with playback stuck (2026-10-17).
+      CLog::Log(LOGWARNING,
+                "CVideoReferenceClock: vblank catch-up did not converge at {:.3f} hertz - "
+                "re-anchoring on the system clock",
+                m_RefreshRate);
+      m_TimeOffset = std::max(m_CurrTime, m_LastIntTime) - CurrentHostCounter();
+      m_UseVblank = false;
+      m_vsyncStopEvent.Set();
+      return CurrentHostCounter() + m_TimeOffset;
     }
 
     if (interpolated)
@@ -284,7 +314,40 @@ double CVideoReferenceClock::GetSpeed()
 void CVideoReferenceClock::UpdateRefreshrate()
 {
   std::unique_lock SingleLock(m_CritSection);
-  m_RefreshRate = static_cast<double>(m_pVideoSync->GetFps());
+
+  // EVERY consumer of m_RefreshRate divides by it - UpdateInterval() and
+  // TimeOfNextVblank() both do - and this runs on every Setup, which means
+  // every vblank-clock restart. A display reset on a 3D title restarts it
+  // while the HDMI mode is still being renegotiated, and GetFps() reads the
+  // gfx context, which has no meaningful rate at that moment. A zero or
+  // absurd value there does not merely mistime a frame: it makes the clock's
+  // own increments enormous, GetTime()'s catch-up loop advances m_CurrTime by
+  // garbage, and the DVD clock the audio compares against explodes - measured
+  // as "ActiveAE - large audio sync error: -1.4e10" followed by a player
+  // clock pinned at INT32_MAX and playback stuck, on three separate 3D titles
+  // (Wonder Woman/3D Atmos, Titanic/3D Part 1, Jurassic Park/3D, 2026-10-16/17).
+  //
+  // So a rate outside what any display can present is rejected and the last
+  // good one kept. Keeping a stale rate costs at most slightly mistimed
+  // vblank bookkeeping until the next Setup; taking the bad one costs the
+  // session.
+  const double reported = static_cast<double>(m_pVideoSync->GetFps());
+  if (reported >= MIN_SANE_REFRESHRATE && reported <= MAX_SANE_REFRESHRATE)
+  {
+    m_RefreshRate = reported;
+  }
+  else
+  {
+    // Keeping the previous value is only safe if it is itself sane - the
+    // constructor's starting value is not a measured rate.
+    if (m_RefreshRate < MIN_SANE_REFRESHRATE || m_RefreshRate > MAX_SANE_REFRESHRATE)
+      m_RefreshRate = FALLBACK_REFRESHRATE;
+
+    CLog::Log(LOGWARNING,
+              "CVideoReferenceClock: ignoring refreshrate {:.3f} hertz (outside {:.0f}-{:.0f}), "
+              "using {:.3f}",
+              reported, MIN_SANE_REFRESHRATE, MAX_SANE_REFRESHRATE, m_RefreshRate);
+  }
   m_ClockSpeed = 1.0;
 
   CLog::Log(LOGDEBUG, "CVideoReferenceClock: Detected refreshrate: {:.3f} hertz", m_RefreshRate);
