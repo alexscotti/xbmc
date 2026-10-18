@@ -417,6 +417,8 @@ void CBlurayStreamCache::MaybeQueuePrime(const std::shared_ptr<FileState>& file,
   {
     std::lock_guard<std::mutex> lock(m_statsMutex);
     ++m_stats.primesStarted;
+    if (sameClip)
+      ++m_stats.sameClipPrimesStarted;
   }
   m_queueChanged.notify_one();
   if (sameClip)
@@ -474,6 +476,9 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
     {
       std::lock_guard<std::mutex> lock(m_statsMutex);
       ++m_stats.primesAdopted;
+      // This branch is reached ONLY by a same-clip adoption: the open-side
+      // path above handles every prime that crossed into another file.
+      ++m_stats.sameClipPrimesAdopted;
     }
   }
 
@@ -1378,7 +1383,8 @@ void CBlurayStreamCache::LogStats(const char* reason)
             "{} bytes) | pages {} requested = {} resident + {} waited + {} fail-open, {} fetched "
             "({} failed, {} retries) | waits >=10ms {} >=100ms {} >=1s {}, max {} ms, longest "
             "stall ridden {} ms | seeks {} in window / {} out | {} evictions, {} fail-open reads, "
-            "{} workers abandoned | primes {} started / {} adopted / {} dropped, {} pages | "
+            "{} workers abandoned | primes {} started / {} adopted / {} dropped, {} pages "
+            "({} same-clip started / {} adopted) | "
             "waits: {} first-of-title, {} first-of-clip ({} primed / {} unprimed), "
             "{} after-seek, {} sequential | "
             "{} files retained, {} pages resident",
@@ -1390,7 +1396,8 @@ void CBlurayStreamCache::LogStats(const char* reason)
             s.pagesFetched, s.pageFailures, s.retries, s.waits10ms, s.waits100ms, s.waits1000ms,
             s.maxWaitMs, s.longestStallRiddenMs, s.seeksInWindow, s.seeksOutOfWindow, s.evictions,
             s.failOpenReads, s.workersAbandoned, s.primesStarted, s.primesAdopted,
-            s.primesDropped, s.primePagesFetched, s.waitsFirstReadOfTitle,
+            s.primesDropped, s.primePagesFetched, s.sameClipPrimesStarted,
+            s.sameClipPrimesAdopted, s.waitsFirstReadOfTitle,
             s.waitsFirstReadOfFile, s.waitsFirstReadPrimed, s.waitsFirstReadUnprimed,
             s.waitsAfterSeek, s.waitsSequential, s.filesRetained,
             s.pagesResidentNow);

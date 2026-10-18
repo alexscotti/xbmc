@@ -220,6 +220,15 @@ public:
     uint64_t primesStarted{0};
     uint64_t primesAdopted{0};
     uint64_t primesDropped{0};
+    // The same-clip subset of the two above. A playitem whose next entry is a
+    // different byte range of the SAME m2ts primes without a file_open, so it
+    // is invisible in the counters that only the open path moves - and that is
+    // the whole of what distinguishes same-clip priming from clip chaining.
+    // Without these, a run where every prime happened to cross a clip
+    // boundary is indistinguishable from one where the same-clip path is
+    // broken; the first validation runs could not tell the two apart.
+    uint64_t sameClipPrimesStarted{0};
+    uint64_t sameClipPrimesAdopted{0};
     uint64_t primePagesFetched{0};
 
     // sampled at the moment the stats are taken, not accumulated
