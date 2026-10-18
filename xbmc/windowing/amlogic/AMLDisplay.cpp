@@ -1243,12 +1243,45 @@ bool CAMLDisplay::set_native_resolution(const RESOLUTION_INFO &res, std::string 
 
 void CAMLDisplay::handle_display_stereo_mode(const RenderStereoMode stereo_mode)
 {
-  if (m_stereo_mode == RenderStereoMode::UNDEFINED)
+  // Read the KERNEL's mode every time, not just when the cache is undefined.
+  //
+  // m_stereo_mode was assigned in exactly two places - seeded here when
+  // UNDEFINED, and set after a successful write below - so after the first
+  // read the cache was authoritative forever and nothing could notice it
+  // drifting from the hardware. It drifts: the kernel applies "3doff"
+  // ASYNCHRONOUSLY (see set_native_resolution), so a 3D title torn down while
+  // the next one is already opening can leave the transmitter in 3dfp after
+  // Kodi believes it wrote OFF. The next call then sees m_stereo_mode == OFF,
+  // skips the write, and the display stays frame packed.
+  //
+  // Measured on the AM9 Pro under open/teardown churn: 16 of 68 cycles ended
+  // with "1080P23.975 3D-FP" on the wire while a 2D film played - A Safe
+  // Place 1971, Dredd, The Shape of Water, The Patriot, Moonage Daydream
+  // (2026-10-17). A 2D film in frame-packed geometry is wrong video, and when
+  // the geometry lands on a 4K mode (vout 3840x2160 -> 3840x4410) the link
+  // drops and nothing recovers it - not even writing the phy, because it is
+  // the geometry that is wrong, not the link.
+  //
+  // One sysfs read per mode set is nothing against that.
   {
     CSysfsPath _kernel_stereo_mode{"/sys/class/amhdmitx/amhdmitx0/stereo_mode"};
     if (_kernel_stereo_mode.Exists())
-      m_stereo_mode = static_cast<RenderStereoMode>(
+    {
+      const RenderStereoMode on_hw = static_cast<RenderStereoMode>(
           _kernel_stereo_mode.Get<int>().value_or(static_cast<int>(RenderStereoMode::UNDEFINED)));
+      if (on_hw != RenderStereoMode::UNDEFINED && on_hw != m_stereo_mode)
+      {
+        CLog::Log(LOGWARNING,
+                  "CAMLDisplay::{}: cached stereo mode {} but the transmitter is in {} - "
+                  "trusting the hardware",
+                  __FUNCTION__, static_cast<int>(m_stereo_mode), static_cast<int>(on_hw));
+        m_stereo_mode = on_hw;
+      }
+      else if (m_stereo_mode == RenderStereoMode::UNDEFINED)
+      {
+        m_stereo_mode = on_hw;
+      }
+    }
   }
 
   if (m_stereo_mode != stereo_mode)
