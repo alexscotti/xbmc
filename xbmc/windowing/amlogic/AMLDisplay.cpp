@@ -1269,16 +1269,22 @@ void CAMLDisplay::handle_display_stereo_mode(const RenderStereoMode stereo_mode)
     {
       const RenderStereoMode on_hw = static_cast<RenderStereoMode>(
           _kernel_stereo_mode.Get<int>().value_or(static_cast<int>(RenderStereoMode::UNDEFINED)));
-      if (on_hw != RenderStereoMode::UNDEFINED && on_hw != m_stereo_mode)
+      // Seed first, and quietly. UNDEFINED is 999, so an unseeded cache
+      // "disagrees" with every real hardware value and the warning below
+      // fired on the very first mode set of a session - "cached stereo mode
+      // 999 but the transmitter is in 0" - which reads like drift and is not.
+      // The warning has to mean drift and nothing else, or it cannot be used
+      // as evidence that drift happened.
+      if (m_stereo_mode == RenderStereoMode::UNDEFINED)
+      {
+        m_stereo_mode = on_hw;
+      }
+      else if (on_hw != RenderStereoMode::UNDEFINED && on_hw != m_stereo_mode)
       {
         CLog::Log(LOGWARNING,
                   "CAMLDisplay::{}: cached stereo mode {} but the transmitter is in {} - "
                   "trusting the hardware",
                   __FUNCTION__, static_cast<int>(m_stereo_mode), static_cast<int>(on_hw));
-        m_stereo_mode = on_hw;
-      }
-      else if (m_stereo_mode == RenderStereoMode::UNDEFINED)
-      {
         m_stereo_mode = on_hw;
       }
     }
