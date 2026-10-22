@@ -3990,7 +3990,17 @@ void CAMLCodec::SetVideoRect(const CRect &SrcRect, const CRect &DestRect)
     // 3D frame packed output: get the screen height from the graphic context
     // (will work in fullscreen mode only)
     RESOLUTION_INFO info = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo();
-    dst_rect.y2 = info.iHeight * 2 + info.iBlanking;
+    // The packed picture is one eye, the blanking, the other eye. Keep that
+    // height and START it where the eye's picture starts: a view-mode
+    // vertical shift moves y1, and pinning y2 to the packed height instead
+    // squashed the pair into what was left (axis 0 132 1919 2204 for a
+    // 132-line shift, measured on the AM9 Pro). With the height kept, the
+    // shifted lines that leave the first eye fall into the blanking and the
+    // top of the second eye; Symphony's aspect shift is exactly an eye's
+    // bottom letterbox bar, so those lines are black, and the video driver
+    // crops the source lines that fall past the bottom of the output.
+    // Unshifted (y1 == 0) this is the old value.
+    dst_rect.y2 = dst_rect.y1 + info.iHeight * 2 + info.iBlanking;
   }
 
   if (static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay()->aml_display_support_3d())
