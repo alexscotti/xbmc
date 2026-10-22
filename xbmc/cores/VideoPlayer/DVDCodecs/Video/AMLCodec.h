@@ -89,6 +89,7 @@ public:
   void          SetSpeed(int speed);
   void          SetDrain(bool drain){m_drain = drain;};
   void          SetVideoRect(const CRect &SrcRect, const CRect &DestRect);
+  void          SetFramePackingBlank(int blank);
   void          SetVideoRate(int videoRate);
   uint64_t      GetOMXPts() const { return m_cur_pts; }
   uint32_t      GetBufferIndex() const { return m_bufferIndex; };

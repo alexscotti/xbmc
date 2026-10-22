@@ -3852,6 +3852,31 @@ void CAMLCodec::SetVideoSaturation(const int saturation)
   CSysfsPath("/sys/class/video/saturation", saturation);
 }
 
+void CAMLCodec::SetFramePackingBlank(int blank)
+{
+  // The video driver's frame-packing gap (aml_media framepacking_blank). Its
+  // own value is read once, before the first write, and put back whenever
+  // nothing asks for another: a shifted gap must never outlive the shifted
+  // 3D picture it was set for.
+  static const char* path = "/sys/module/aml_media/parameters/framepacking_blank";
+  static int driverDefault = -1;
+  static int current = -1;
+  CSysfsPath sysfs(path);
+  if (!sysfs.Exists())
+    return;
+  if (driverDefault < 0)
+  {
+    driverDefault = sysfs.Get<int>().value_or(45);
+    current = driverDefault;
+  }
+  int want = blank >= 0 ? blank : driverDefault;
+  if (want == current)
+    return;
+  sysfs.Set(want);
+  current = want;
+  CLog::Log(LOGINFO, "CAMLCodec::SetFramePackingBlank: framepacking_blank {}", want);
+}
+
 void CAMLCodec::SetVideoRect(const CRect &SrcRect, const CRect &DestRect)
 {
   // this routine gets called every video frame
@@ -3969,6 +3994,10 @@ void CAMLCodec::SetVideoRect(const CRect &SrcRect, const CRect &DestRect)
     dst_rect.y2 *= yscale;
   }
 
+  // framepacking_blank for this rect: -1 = the driver's own value (see the
+  // HARDWAREBASED branch below).
+  int packingBlank = -1;
+
   if (m_guiStereoMode == RenderStereoMode::MONO)
   {
     std::string videoStereoMode = m_processInfo.GetVideoStereoMode();
@@ -4001,6 +4030,19 @@ void CAMLCodec::SetVideoRect(const CRect &SrcRect, const CRect &DestRect)
     // crops the source lines that fall past the bottom of the output.
     // Unshifted (y1 == 0) this is the old value.
     dst_rect.y2 = dst_rect.y1 + info.iHeight * 2 + info.iBlanking;
+    // ...and the second eye has to move as far as the first. The video
+    // driver places it at half the packed height it has left after cropping
+    // what runs past the output, plus framepacking_blank. A shift of d lines
+    // crops the packed picture by d, so with the stock gap the second eye
+    // lands only ~d/2 lower (measured on the AM9 Pro from a frame-packed
+    // capture: 131 lines moved the left eye 131 and the right eye ~65).
+    // Growing the gap by d makes the driver crop each eye by d instead and
+    // put the second eye exactly one eye + blanking below the first: both
+    // eyes land on the same lines (captured: 268-1071 in each eye at d=131).
+    // The cropped lines are the bottom of each eye, which for Symphony's
+    // aspect shift is letterbox bar.
+    if (dst_rect.y1 > 0)
+      packingBlank = info.iBlanking + static_cast<int>(dst_rect.y1);
   }
 
   if (static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay()->aml_display_support_3d())
@@ -4065,6 +4107,8 @@ void CAMLCodec::SetVideoRect(const CRect &SrcRect, const CRect &DestRect)
 
   int screen_mode = CDisplaySettings::GetInstance().IsNonLinearStretched() ? 4 : 1;
 
+  // Before the axis: the driver recomputes the eye layout from both.
+  SetFramePackingBlank(packingBlank);
   CSysfsPath("/sys/class/video/axis", video_axis);
   CSysfsPath("/sys/class/video/screen_mode", screen_mode);
 
