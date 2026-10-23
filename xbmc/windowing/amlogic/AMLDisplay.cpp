@@ -755,11 +755,24 @@ bool CAMLDRMUtils::leaving_dv_wire() const
 // output without a mode change), so the next window update must force a mode set.
 // Into DV only when the kernel really outputs it: a forced DV request it refuses
 // (HDR10+ to an HDR10+ sink, a non-DV sink) must not pin the link to 8-bit.
+//
+// A disc session holding DV stands down only the LEAVING half (leaving_dv_wire()
+// checks it): forcing the wire native under a held session could leave the sink a
+// latched Dolby VSIF over the wrong link. The INTO-DV half must still run under the
+// session, because a wire that does not match a DV core that is outputting DV is
+// already a broken picture, and re-training it is the only fix. It happens when a
+// mode set lands while the core is out of DV - an HDMI reconnect (the HDFury or AVR
+// coming up after playback started) on a disc's non-DV opening clip: the kernel
+// decides the native 444 10-bit, the later DV segments re-engage under the session
+// with no mode change, and every one was then sent as LLDV over a 10-bit 444 link -
+// raised blacks and a purple cast for the rest of the disc (10 Cloverfield Lane on an
+// AM9 Pro, 2026-10-22). The check is false whenever the wire already fits, so a
+// healthy session's segment swaps still take no re-train.
 bool CAMLDRMUtils::aml_output_wire_stale()
 {
-  if (aml_dv_disc_engaged())
-    return false;
-  return (aml_dv_core_outputs_dv() && aml_dv_wire_format_mismatch()) || leaving_dv_wire();
+  if (aml_dv_core_outputs_dv() && aml_dv_wire_format_mismatch())
+    return true;
+  return leaving_dv_wire();
 }
 
 void CAMLDRMUtils::set_drmProp(unsigned int id, std::string name,
