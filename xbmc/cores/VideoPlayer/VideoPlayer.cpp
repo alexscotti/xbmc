@@ -3694,7 +3694,18 @@ void CVideoPlayer::HandlePlaySpeed()
   // handle ff/rw
   if (m_playSpeed != DVD_PLAYSPEED_NORMAL && m_playSpeed != DVD_PLAYSPEED_PAUSE)
   {
-    if (isInMenu)
+    // Trick play is seeking, so it is refused where seeking is: in a menu that
+    // forbids it. The raw menu flag alone is not that - on a Blu-ray it is up
+    // whenever a BD-J overlay exists, visible or not, and 10 Cloverfield Lane's
+    // keeps one through the whole film, so every fast forward and rewind there
+    // was cancelled the moment it started (chapter skip, which is not gated
+    // here, worked). CanSeek is !IsInMenu() for a DVD, unchanged, and the
+    // disc's UO mask on a Blu-ray - the same test DiscMenuState uses.
+    std::shared_ptr<CDVDInputStream::IMenus> menus =
+        std::dynamic_pointer_cast<CDVDInputStream::IMenus>(m_pInputStream);
+    const bool trickPlayForbidden =
+        isInMenu && (m_dvd.state == DVDSTATE_STILL || !menus || !menus->CanSeek());
+    if (trickPlayForbidden)
     {
       // this can't be done in menu
       SetPlaySpeed(DVD_PLAYSPEED_NORMAL);
