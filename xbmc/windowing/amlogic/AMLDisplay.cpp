@@ -739,6 +739,28 @@ void CAMLDRMUtils::apply_dv_wire_format()
             "the connector colour properties", __FUNCTION__,
             player_led ? "YUV422 12-bit" : "YUV444 8-bit");
 
+  // One commit, not three. Each set_drmProp(..., NULL) is its own implicit atomic
+  // commit, and each one makes the kernel re-decide the link: three decides in
+  // ~130ms with the DV core dropping to SDR8 and back between them (VSIF
+  // signal_sdr toggles the sink sees). Measured on an AM9 Pro at the start of 10
+  // Cloverfield Lane's Paramount logo: the picture held ~0.4s and then jumped 10
+  // frames, and this was half of the hold. Batched, the kernel sees colour space,
+  // depth (color_force) and UPDATE in one connector state and decides once.
+  bool committed = false;
+  if (drmModeAtomicReqPtr req = drmModeAtomicAlloc())
+  {
+    set_drmProp(m_connector->connector_id, "color_space", DRM_MODE_OBJECT_CONNECTOR, cs, req);
+    set_drmProp(m_connector->connector_id, "color_depth", DRM_MODE_OBJECT_CONNECTOR, bd, req);
+    set_drmProp(m_connector->connector_id, "UPDATE", DRM_MODE_OBJECT_CONNECTOR, 1, req);
+    committed = (drmModeAtomicCommit(m_fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0);
+    drmModeAtomicFree(req);
+  }
+  if (committed)
+    return;
+
+  // The batched commit was refused: the three separate writes always worked.
+  CLog::Log(LOGWARNING, "CAMLDRMUtils::{} - batched colour commit refused, applying the "
+            "properties one by one", __FUNCTION__);
   set_drmProp(m_connector->connector_id, "color_space", DRM_MODE_OBJECT_CONNECTOR, cs, NULL);
   set_drmProp(m_connector->connector_id, "color_depth", DRM_MODE_OBJECT_CONNECTOR, bd, NULL);
   set_drmProp(m_connector->connector_id, "UPDATE", DRM_MODE_OBJECT_CONNECTOR, 1, NULL);
