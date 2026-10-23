@@ -923,7 +923,21 @@ void CAMLDRMUtils::aml_set_drmProperty(std::string name, unsigned int obj_type, 
         if (m_connector)
           id = m_connector->connector_id;
         set_drmProp(id, name, obj_type, value, NULL);
-        [[fallthrough]];
+        return;
+      case DRM_MODE_OBJECT_CRTC:
+        // The CRTC is there whatever the sink is doing, and the DV core's
+        // per-stream setup lives on it (dv_enable, dv_ll_policy, dv_mode,
+        // dv_policy). Dropping those while HPD is low - the ~1s the HDFury
+        // takes to switch to this box as a film starts from the gui - opened
+        // 10 Cloverfield Lane's dual-layer DV logo with the core not set up
+        // for it, and the decoder wedged (no frame for 5s, three times).
+        if (m_crtc)
+        {
+          CLog::Log(LOGINFO, "CAMLDRMUtils::{} - applying CRTC property '{}' = {} while "
+                    "disconnected", __FUNCTION__, name, value);
+          set_drmProp(m_crtc->crtc_id, name, obj_type, value, NULL);
+        }
+        return;
       default:
         return;
     }
