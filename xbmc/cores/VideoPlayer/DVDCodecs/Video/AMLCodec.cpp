@@ -3470,18 +3470,30 @@ void CAMLCodec::CheckDvWire()
   // below then fixes the link on a later pass. Three tries per stream, then stop
   // playback and say so, as the FEL guard does: a DV disc silently shown as SDR
   // is a wrong picture.
-  if (m_dvNativeWanted && aml_dv_core_forced_to_conversion() && aml_display_support_dv())
+  //
+  // The same goes for a core an HDMI plug-out switched off after this stream set
+  // it up: the gui switches the HDFury to this box as a film starts, the HDFury
+  // drops HPD for ~1s, and the plug-out handling disables the DV core. 10
+  // Cloverfield Lane's dual-layer Paramount logo then decoded with
+  // dolby_vision_enable N for the whole clip and the decoder wedged (no frame
+  // for 5s, three times) on 3 of 5 gui launches (AM9 Pro, 2026-10-23).
+  // Only a disabled core or a forced conversion counts - not the enabled
+  // BYPASS a DV core passes through between segments.
+  if (m_dvNativeWanted && (aml_dv_core_disabled() || aml_dv_core_forced_to_conversion()) &&
+      aml_display_support_dv())
   {
     if (m_dvReengageTries < 3)
     {
       ++m_dvReengageTries;
       const unsigned int was = aml_dv_dolby_vision_mode();
+      const bool wasDisabled = aml_dv_core_disabled();
       const unsigned int mode = aml_dv_request_native_output();
       aml_dv_set_output_mode(mode);
       aml_dv_apply_target_overrides(mode);
-      CLog::Log(LOGWARNING, "CAMLCodec::CheckDvWire: DV stream but the DV core is forced to "
-                "output mode {} with a DV display - requesting native DV (mode {}), try {}, "
-                "kernel now reads {}", was, mode, m_dvReengageTries, aml_dv_dolby_vision_mode());
+      CLog::Log(LOGWARNING, "CAMLCodec::CheckDvWire: DV stream but the DV core is {} "
+                "(output mode {}) with a DV display - requesting native DV (mode {}), try {}, "
+                "kernel now reads {}", wasDisabled ? "disabled" : "forced to a conversion",
+                was, mode, m_dvReengageTries, aml_dv_dolby_vision_mode());
       m_dvWireNextCheck = now + std::chrono::seconds(2);
       return;
     }

@@ -968,6 +968,8 @@ bool aml_dv_core_outputs_dv()
   return mode == DOLBY_VISION_OUTPUT_MODE_IPT || mode == DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL;
 }
 
+bool aml_dv_core_disabled() { return !aml_dv_core_enabled(); }
+
 bool aml_dv_core_forced_to_conversion()
 {
   if (!aml_dv_core_enabled())

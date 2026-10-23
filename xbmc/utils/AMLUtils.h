@@ -168,6 +168,9 @@ bool aml_dv_core_leaves_native_wire();
 // state the kernel leaves a DV request in when the sink did not advertise DV at
 // the moment it was made.
 bool aml_dv_core_forced_to_conversion();
+// True when the DV core is switched off altogether (dolby_vision_enable N) - what
+// an HDMI plug-out leaves behind, whatever the stream set up before it.
+bool aml_dv_core_disabled();
 // Ask the kernel again for the native DV output (the same writes as the disc
 // session's engage). Returns the tunnel mode requested.
 unsigned int aml_dv_request_native_output();
