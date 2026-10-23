@@ -3424,6 +3424,39 @@ bool ReadDvLayerCounts(int64_t& bl, int64_t& el)
 // enhancement decoder at all - trips it. A count that goes backwards is a
 // decoder reopen and starts a new window. MEL titles are never checked: their
 // enhancement layer carries no picture and the DV core bypasses it by design.
+// The HDMI link is only ever put into the DV tunnel format by a window update
+// (CreateNewWindow -> aml_output_wire_stale -> apply_dv_wire_format), and a
+// window update runs at a segment start, when the DV core is still in BYPASS
+// for that segment. So a link the kernel re-decided while the core was OUT of
+// DV - an HDMI reconnect against a not-yet-ready sink (the HDFury or AVR still
+// coming up after playback started) clears DV, the plug-in mode set lands on
+// the native 444 10-bit - stays that way once DV re-engages, with no mode change
+// to correct it: LLDV over a 10-bit 444 link, raised blacks and a purple cast for
+// the rest of the disc (10 Cloverfield Lane on an AM9 Pro, 2026-10-22).
+//
+// So check where DV is actually being output: once a second, cheaply (three
+// sysfs reads), and when the core outputs DV over a link that does not fit it,
+// ask for a forced window update on the application thread - posted, never
+// sent, so the decoder does not wait on it. aml_output_wire_stale() then sees
+// the stale wire and the update re-trains it. Ten seconds between requests so a
+// fix that does not take can never become a re-train loop.
+void CAMLCodec::CheckDvWire()
+{
+  const auto now = std::chrono::steady_clock::now();
+  if (now < m_dvWireNextCheck)
+    return;
+  m_dvWireNextCheck = now + std::chrono::seconds(1);
+
+  if (!aml_dv_core_outputs_dv() || !aml_dv_wire_format_mismatch())
+    return;
+
+  const RESOLUTION res = CServiceBroker::GetWinSystem()->GetGfxContext().GetVideoResolution();
+  CLog::Log(LOGINFO, "CAMLCodec::CheckDvWire: the DV core outputs DV over a link that "
+            "does not fit it - requesting a window update to re-train it");
+  CServiceBroker::GetAppMessenger()->PostMsg(TMSG_SETVIDEORESOLUTION, res, 1);
+  m_dvWireNextCheck = now + std::chrono::seconds(10);
+}
+
 void CAMLCodec::CheckFelEnhancementLayer()
 {
   using namespace std::chrono_literals;
@@ -3500,6 +3533,7 @@ CDVDVideoCodec::VCReturn CAMLCodec::GetPicture(VideoPicture *pVideoPicture)
     return CDVDVideoCodec::VC_ERROR;
 
   CheckFelEnhancementLayer();
+  CheckDvWire();
 
   // While draining, always attempt the dequeue - drain means no further
   // input is coming, so the fill gates are moot and anything the hardware

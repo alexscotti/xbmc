@@ -213,6 +213,11 @@ private:
   std::chrono::steady_clock::time_point m_felGuardLastPoll{};
   int64_t         m_felGuardBl0 = -1;
   int64_t         m_felGuardEl0 = -1;
+
+  // DV wire guard: the HDMI link must be in the DV tunnel format whenever the DV
+  // core is outputting DV. See CheckDvWire.
+  void CheckDvWire();
+  std::chrono::steady_clock::time_point m_dvWireNextCheck{};
   bool            m_felGuardTripped = false;
   // This decoder was opened on a Dolby Vision profile 7 stream that should
   // play as DV (device and display support it, not disabled by the user).
