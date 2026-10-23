@@ -752,7 +752,23 @@ void CAMLDRMUtils::apply_dv_wire_format()
     set_drmProp(m_connector->connector_id, "color_space", DRM_MODE_OBJECT_CONNECTOR, cs, req);
     set_drmProp(m_connector->connector_id, "color_depth", DRM_MODE_OBJECT_CONNECTOR, bd, req);
     set_drmProp(m_connector->connector_id, "UPDATE", DRM_MODE_OBJECT_CONNECTOR, 1, req);
-    committed = (drmModeAtomicCommit(m_fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0);
+    // Non-blocking: this runs on the render thread, and the blocking commit
+    // held it for 125ms while the kernel re-trained the link (measured on the
+    // AM9 Pro at the Paramount logo of 10 Cloverfield Lane): the renderer then
+    // woke up behind its clock and dropped 4 frames to catch up - a freeze and
+    // a jump on screen. The re-train is a signal change the sink sees either
+    // way; non-blocking, the frames keep their timing through it. A refused
+    // non-blocking modeset (EBUSY with a commit still in flight) falls back to
+    // the blocking one.
+    int res = drmModeAtomicCommit(m_fd, req,
+                                  DRM_MODE_ATOMIC_ALLOW_MODESET | DRM_MODE_ATOMIC_NONBLOCK, NULL);
+    if (res != 0)
+    {
+      CLog::Log(LOGDEBUG, "CAMLDRMUtils::{} - non-blocking colour commit refused ({}), "
+                "committing blocking", __FUNCTION__, res);
+      res = drmModeAtomicCommit(m_fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+    }
+    committed = (res == 0);
     drmModeAtomicFree(req);
   }
   if (committed)
