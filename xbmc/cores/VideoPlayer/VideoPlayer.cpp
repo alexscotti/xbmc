@@ -5733,7 +5733,12 @@ void CVideoPlayer::SetSpeed(float speed)
 {
   // can't rewind in menu as seeking isn't possible
   // forward is fine
-  if (speed < 0 && IsInMenu())
+  // IsInDiscMenu, not IsInMenu: a Blu-ray's raw menu flag is up whenever a BD-J
+  // overlay exists, and 10 Cloverfield Lane keeps one through its film, where
+  // seeking is allowed - rewind was refused there with no feedback at all.
+  // IsInDiscMenu is the raw flag and no seeking on a Blu-ray in navigation
+  // mode, and the raw flag itself on a DVD.
+  if (speed < 0 && IsInDiscMenu())
     return;
 
   if (!CanSeek() && !CanPause())
