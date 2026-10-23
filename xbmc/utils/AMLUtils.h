@@ -164,6 +164,13 @@ bool aml_dv_core_outputs_dv();
 // True when a re-decided HDMI attr would be the native one rather than the DV
 // tunnel format (core disabled, or forced to HDR10/SDR output).
 bool aml_dv_core_leaves_native_wire();
+// True when the DV core is enabled but FORCED to an HDR10/SDR conversion - the
+// state the kernel leaves a DV request in when the sink did not advertise DV at
+// the moment it was made.
+bool aml_dv_core_forced_to_conversion();
+// Ask the kernel again for the native DV output (the same writes as the disc
+// session's engage). Returns the tunnel mode requested.
+unsigned int aml_dv_request_native_output();
 void aml_dv_set_vs10_mode(unsigned int mode);
 // Resolve the stored "Dolby Vision" VS10 option (IPT) to the tunnel form the
 // current TV-led / player-led output setting actually needs.

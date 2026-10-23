@@ -2261,6 +2261,9 @@ bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, bool isDualSt
   am_private->gcodec.dec_mode    = STREAM_TYPE_FRAME;
   am_private->gcodec.video_path  = FRAME_BASE_PATH_AMLVIDEO_AMVIDEO;
 
+  m_dvNativeWanted = false;
+  m_dvReengageTries = 0;
+
   // enable Dolby Vision driver when 'dovi.ko' is available
   bool device_support_dv(aml_support_dolby_vision());
   bool display_support_dv(static_cast<CWinSystemAmlogic*>(CServiceBroker::GetWinSystem())->GetAmlDisplay()->aml_display_support_dv());
@@ -2375,8 +2378,14 @@ bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, bool isDualSt
       else if (!aml_display_support_dv() &&
           vs10_mode != DOLBY_VISION_OUTPUT_MODE_SDR10 &&
           vs10_mode != DOLBY_VISION_OUTPUT_MODE_HDR10)
+      {
         vs10_mode = aml_display_support_hdr_pq() ? DOLBY_VISION_OUTPUT_MODE_HDR10
                                                  : DOLBY_VISION_OUTPUT_MODE_SDR10;
+        // Not m_dvNativeWanted: a profile 7/8 stream opened against a non-DV
+        // display has its RPU stripped upstream, so it cannot be switched to
+        // native DV mid-stream. Its conversion is a valid picture; the next
+        // segment opens native again.
+      }
       if (vs10_mode == DOLBY_VISION_OUTPUT_MODE_SDR10 || vs10_mode == DOLBY_VISION_OUTPUT_MODE_HDR10)
       {
         CSysfsPath("/sys/module/aml_media/parameters/dolby_vision_policy", AMDV_FORCE_OUTPUT_MODE);
@@ -2402,8 +2411,11 @@ bool CAMLCodec::OpenDecoder(CDVDStreamInfo &hints, bool doviIsFEL, bool isDualSt
                                                       : DOLBY_VISION_OUTPUT_MODE_SDR10;
       }
       else
+      {
         // Native DV output (tunnel left intact): the sink receives a PQ signal.
         dv_output_mode = DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL;
+        m_dvNativeWanted = true;
+      }
     }
 
     if (hints.dovi.dv_profile == 4 || hints.dovi.dv_profile == 7)
@@ -3446,6 +3458,44 @@ void CAMLCodec::CheckDvWire()
   if (now < m_dvWireNextCheck)
     return;
   m_dvWireNextCheck = now + std::chrono::seconds(1);
+
+  // A DV stream that should be native DV but finds the core FORCED to an
+  // HDR10/SDR conversion: the kernel's answer to a DV request made while the
+  // sink did not advertise DV (an HDMI reconnect against a sink still coming
+  // up). The native branch writes no mode of its own - it relies on the disc
+  // session's engage - so the conversion an earlier stream was given stays in
+  // force for the rest of the disc (129s of SDR8 measured on an AM9 Pro, 10
+  // Cloverfield Lane, 2026-10-23, after "display does support DV" at the next
+  // segment). Once the display advertises DV again, ask again; the wire check
+  // below then fixes the link on a later pass. Three tries per stream, then stop
+  // playback and say so, as the FEL guard does: a DV disc silently shown as SDR
+  // is a wrong picture.
+  if (m_dvNativeWanted && aml_dv_core_forced_to_conversion() && aml_display_support_dv())
+  {
+    if (m_dvReengageTries < 3)
+    {
+      ++m_dvReengageTries;
+      const unsigned int was = aml_dv_dolby_vision_mode();
+      const unsigned int mode = aml_dv_request_native_output();
+      aml_dv_set_output_mode(mode);
+      aml_dv_apply_target_overrides(mode);
+      CLog::Log(LOGWARNING, "CAMLCodec::CheckDvWire: DV stream but the DV core is forced to "
+                "output mode {} with a DV display - requesting native DV (mode {}), try {}, "
+                "kernel now reads {}", was, mode, m_dvReengageTries, aml_dv_dolby_vision_mode());
+      m_dvWireNextCheck = now + std::chrono::seconds(2);
+      return;
+    }
+    if (m_dvReengageTries == 3)
+    {
+      ++m_dvReengageTries;
+      CLog::Log(LOGERROR, "CAMLCodec::CheckDvWire: the DV core stays on output mode {} after "
+                "3 requests for native DV - stopping playback", aml_dv_dolby_vision_mode());
+      CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Error, "Dolby Vision",
+                                            "Dolby Vision output lost - playback stopped");
+      CServiceBroker::GetAppMessenger()->PostMsg(TMSG_MEDIA_STOP);
+    }
+    return;
+  }
 
   if (!aml_dv_core_outputs_dv() || !aml_dv_wire_format_mismatch())
     return;

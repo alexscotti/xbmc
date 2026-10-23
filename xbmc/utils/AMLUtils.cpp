@@ -968,6 +968,36 @@ bool aml_dv_core_outputs_dv()
   return mode == DOLBY_VISION_OUTPUT_MODE_IPT || mode == DOLBY_VISION_OUTPUT_MODE_IPT_TUNNEL;
 }
 
+bool aml_dv_core_forced_to_conversion()
+{
+  if (!aml_dv_core_enabled())
+    return false;
+  CSysfsPath policy{"/sys/module/aml_media/parameters/dolby_vision_policy"};
+  if (!policy.Exists() || policy.Get<unsigned int>().value_or(0) != AMDV_FORCE_OUTPUT_MODE)
+    return false;
+  const unsigned int mode = aml_dv_dolby_vision_mode();
+  return mode == DOLBY_VISION_OUTPUT_MODE_HDR10 || mode == DOLBY_VISION_OUTPUT_MODE_SDR10 ||
+         mode == DOLBY_VISION_OUTPUT_MODE_SDR8;
+}
+
+unsigned int aml_dv_request_native_output()
+{
+  // The writes aml_dv_engage_disc_session_now() makes, without touching the
+  // session state: under FORCE the kernel re-runs its policy on the dv_mode
+  // write (amdv_policy_process), which now finds a DV sink.
+  CSysfsPath("/sys/module/aml_media/parameters/dolby_vision_enable", 'Y');
+  const bool playerLed = CServiceBroker::GetSettingsComponent()->GetSettings()->
+    GetInt(CSettings::SETTING_COREELEC_AMLOGIC_DV_LED) == AML_DV_PLAYER_LED;
+  CSysfsPath ll_policy{"/sys/module/aml_media/parameters/dolby_vision_ll_policy"};
+  if (ll_policy.Exists())
+    ll_policy.Set(playerLed ? 1u /* DOLBY_VISION_LL_YUV422 */
+                            : 0u /* DOLBY_VISION_LL_DISABLE */);
+  CSysfsPath("/sys/module/aml_media/parameters/dolby_vision_policy", AMDV_FORCE_OUTPUT_MODE);
+  const unsigned int mode = aml_dv_resolve_tunnel_mode(DOLBY_VISION_OUTPUT_MODE_IPT);
+  CSysfsPath("/sys/class/amdolby_vision/dv_mode", (mode + 1) % 6);
+  return mode;
+}
+
 bool aml_dv_core_leaves_native_wire()
 {
   // Patch 0004's is_amdv_output_dv() still forces the tunnel format while the core

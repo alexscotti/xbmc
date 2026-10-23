@@ -218,6 +218,10 @@ private:
   // core is outputting DV. See CheckDvWire.
   void CheckDvWire();
   std::chrono::steady_clock::time_point m_dvWireNextCheck{};
+  // This stream opened on the native DV branch (a DV display): it must reach the
+  // sink as DV. See CheckDvWire.
+  bool            m_dvNativeWanted = false;
+  int             m_dvReengageTries = 0;
   bool            m_felGuardTripped = false;
   // This decoder was opened on a Dolby Vision profile 7 stream that should
   // play as DV (device and display support it, not disabled by the user).
