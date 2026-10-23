@@ -1170,6 +1170,23 @@ void CAMLDisplay::aml_refresh_display_caps()
   hdr_cap = hdr_cap < 0 ? 0 : hdr_cap;
   dv_cap = dv_cap < 0 ? 0 : dv_cap;
 
+  // A disconnected sink has no capabilities to read, and an HDMI reconnect is
+  // exactly when this runs: the HDFury drops HPD for ~1s each time it switches
+  // to this box's input, which the gui does as a film starts. Taking the empty
+  // read as the truth told a stream opening in that window "display does not
+  // support DV" - 10 Cloverfield Lane's Paramount logo, launched from the gui,
+  // opened its dual-layer DV decoder for a non-DV display, which wedged it
+  // (no frame for 5s, three times in a row; AM9 Pro, 2026-10-23). Keep what
+  // the sink last reported until it is connected again; the reconnect's own
+  // refresh then reads the real capabilities, of a different sink as well.
+  if (!aml_get_display_connected() && hdr_cap == 0 && dv_cap == 0)
+  {
+    CLog::Log(LOGINFO, "CAMLDisplay::{} - display not connected, keeping its last reported "
+              "capabilities (DV {})", __FUNCTION__,
+              aml_display_support_dv() ? "supported" : "not supported");
+    return;
+  }
+
   if (hdr_cap & (HDR10_CAP | SMPTE_ST_2084_CAP))
     caps.SetHDR10();
 
