@@ -169,6 +169,36 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
     return true;
   }
 
+  // An HDR type change (or a stale DV wire) at an unchanged mode needs the HDMI
+  // link re-decided and nothing else: the mode string is the same, so the DRM
+  // mode set is a no-op ("mode ... is already set") apart from the wire
+  // handling, and the GBM/EGL surface would be rebuilt identical. But the full
+  // path below tells every display resource the display is lost first, and
+  // CVideoPlayer pauses video, audio and the clock until the surface is back:
+  // ~0.4s of a held picture at every DV engage, then a 10-frame jump as the
+  // video catches up (10 Cloverfield Lane's Paramount logo on an AM9 Pro,
+  // 2026-10-23). So update the link in place, without losing the display.
+  const bool same_mode =
+      m_bWindowCreated && m_bFullScreen == fullScreen && nativeGUI == m_nativeGUI &&
+      current_resolution.iWidth == res.iWidth && current_resolution.iHeight == res.iHeight &&
+      current_resolution.iScreenWidth == res.iScreenWidth &&
+      current_resolution.iScreenHeight == res.iScreenHeight &&
+      MathUtils::FloatEquals(current_resolution.fRefreshRate, res.fRefreshRate, 0.06f) &&
+      (current_resolution.dwFlags & D3DPRESENTFLAG_MODEMASK) ==
+          (res.dwFlags & D3DPRESENTFLAG_MODEMASK);
+  if (same_mode && (force_mode_switch_by_hdr || force_mode_switch_by_wire) &&
+      !force_mode_switch_by_hotplug && !force_mode_switch_by_fractional_rate &&
+      !force_mode_switch_by_stereo_mode)
+  {
+    CLog::Log(LOGINFO, "CWinSystemAmlogicGLESContext::{}: {} at an unchanged mode - "
+              "updating the HDMI link in place", __FUNCTION__,
+              force_mode_switch_by_hdr ? "HDR type change" : "stale DV wire");
+    m_hdrType = hdrType;
+    m_amlDisplay->set_native_resolution(res, m_framebuffer_name, stereo_mode, true, false);
+    aml_dv_engage_pending_disc_session(hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION);
+    return true;
+  }
+
   // destroy old window, then create a new one
   DestroyWindow();
 
