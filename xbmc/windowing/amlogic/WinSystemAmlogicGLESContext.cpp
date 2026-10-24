@@ -235,6 +235,13 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
       for (IDispResource* resource : m_resources)
         resource->OnResetDisplay();
     }
+    // Repaint the GUI as the full path does after a new surface. The GUI only
+    // redraws what is dirty, and nothing is dirty after a reconnect, so the last
+    // frame flipped before it stayed on the OSD plane over the video: the Home
+    // screen with its busy spinner for the whole of 10 Cloverfield Lane's logo
+    // when launched from the gui (the HDFury input switch is the reconnect).
+    if (force_mode_switch_by_hotplug)
+      m_guiRepaintFrames = 3;
     if (m_amlDisplay->aml_get_display_connected())
       SetPresentationReady(true);
     return true;
