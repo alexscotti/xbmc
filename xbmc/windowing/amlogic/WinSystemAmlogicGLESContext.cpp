@@ -186,16 +186,57 @@ bool CWinSystemAmlogicGLESContext::CreateNewWindow(const std::string& name,
       MathUtils::FloatEquals(current_resolution.fRefreshRate, res.fRefreshRate, 0.06f) &&
       (current_resolution.dwFlags & D3DPRESENTFLAG_MODEMASK) ==
           (res.dwFlags & D3DPRESENTFLAG_MODEMASK);
-  if (same_mode && (force_mode_switch_by_hdr || force_mode_switch_by_wire) &&
-      !force_mode_switch_by_hotplug && !force_mode_switch_by_fractional_rate &&
-      !force_mode_switch_by_stereo_mode)
+  // While the display reads as disconnected there is no mode to set: the DRM
+  // mode set is skipped ("connector of drmDevice is not connected") and the
+  // current mode reads as a placeholder, so the comparison above fails and the
+  // full rebuild below ran for nothing - ~210ms of a held picture right as a
+  // film launched from the gui starts, because the gui's HDFury input switch
+  // drops HPD at that moment (10 Cloverfield Lane on an AM9 Pro, 2026-10-23).
+  // The reconnect that follows runs this again with the hotplug flag and does
+  // the mode set and the wire, so only record what changed.
+  if (m_bWindowCreated && !m_amlDisplay->aml_get_display_connected() &&
+      !force_mode_switch_by_hotplug)
+  {
+    CLog::Log(LOGINFO, "CWinSystemAmlogicGLESContext::{}: display not connected - leaving "
+              "the window as it is until the reconnect", __FUNCTION__);
+    m_hdrType = hdrType;
+    return true;
+  }
+
+  // The same in-place update serves a reconnect at an unchanged mode: what it
+  // needs is the mode set (the connector came back with the CRTC off) and the
+  // DV wire, not a new surface. The surface teardown was ~220ms of held picture
+  // after every reconnect during playback. A reconnect still tells the display
+  // resources the display was lost and is back - the audio output re-checks its
+  // passthrough on that - and marks presentation ready again, which the
+  // reconnect handler cleared.
+  if (same_mode &&
+      (force_mode_switch_by_hdr || force_mode_switch_by_wire || force_mode_switch_by_hotplug) &&
+      !force_mode_switch_by_fractional_rate && !force_mode_switch_by_stereo_mode)
   {
     CLog::Log(LOGINFO, "CWinSystemAmlogicGLESContext::{}: {} at an unchanged mode - "
               "updating the HDMI link in place", __FUNCTION__,
-              force_mode_switch_by_hdr ? "HDR type change" : "stale DV wire");
+              force_mode_switch_by_hotplug ? "reconnect"
+              : force_mode_switch_by_hdr   ? "HDR type change"
+                                           : "stale DV wire");
     m_hdrType = hdrType;
-    m_amlDisplay->set_native_resolution(res, m_framebuffer_name, stereo_mode, true, false);
+    if (force_mode_switch_by_hotplug)
+    {
+      std::unique_lock<CCriticalSection> lock(m_resourceSection);
+      for (IDispResource* resource : m_resources)
+        resource->OnLostDisplay();
+    }
+    m_amlDisplay->set_native_resolution(res, m_framebuffer_name, stereo_mode, true,
+                                        force_mode_switch_by_hotplug);
     aml_dv_engage_pending_disc_session(hdrType == StreamHdrType::HDR_TYPE_DOLBYVISION);
+    if (force_mode_switch_by_hotplug)
+    {
+      std::unique_lock<CCriticalSection> lock(m_resourceSection);
+      for (IDispResource* resource : m_resources)
+        resource->OnResetDisplay();
+    }
+    if (m_amlDisplay->aml_get_display_connected())
+      SetPresentationReady(true);
     return true;
   }
 
