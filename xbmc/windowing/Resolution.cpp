@@ -123,10 +123,17 @@ void CResolutionUtils::FindResolutionFromWhitelist(float fps, int width, int hei
     std::vector<RESOLUTION> candidates;
     RESOLUTION_INFO info;
     CServiceBroker::GetWinSystem()->GetGfxContext().GetAllowedResolutions(candidates);
+    // Frame packing is a format of its own (1080p or 720p per eye), never as
+    // wide as a 4K desktop: held to the size rule below, a 3D frame-packed
+    // title found no mode at all on a 4K GUI with an empty whitelist, and
+    // played without switching to 3D. The size rule keeps 2D off modes
+    // smaller than the desktop; it has nothing to say about frame packing.
+    const bool framePacked = (dwFlags & D3DPRESENTFLAG_MODE3DFP) != 0;
     for (const auto& c : candidates)
     {
       info = CServiceBroker::GetWinSystem()->GetGfxContext().GetResInfo(c);
-      if (((info.iScreenWidth >= desktop_info.iScreenWidth) ||
+      if ((framePacked ||
+           (info.iScreenWidth >= desktop_info.iScreenWidth) ||
            (info.iScreenHeight >= curr.iScreenHeight && info.iScreenWidth >= curr.iScreenWidth)) &&
           ModeFlagsMatch(info.dwFlags, dwFlags))
       {
