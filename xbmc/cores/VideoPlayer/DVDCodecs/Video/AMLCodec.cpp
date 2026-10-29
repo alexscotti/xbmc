@@ -2761,6 +2761,14 @@ void CAMLCodec::CloseDecoder()
   // driver's own back now, not at the next title's first SetVideoRect, so a
   // Kodi quit right after this (the remote's Stop) leaves nothing behind.
   SetFramePackingBlank(-1);
+  // The same for the 3D type SetVideoRect gave the video driver: an MVC
+  // title left process_3d_type at 0x821 and g_framepacking_support at 1
+  // until some later 2D title's first SetVideoRect, across Kodi restarts
+  // (measured on the AM9 Pro 2026-10-29). The next title re-sends its own
+  // on its first SetVideoRect - OpenDecoder clears m_dst_rect, so that call
+  // always runs, a reopen of this object included.
+  if (AmlDisplay->aml_display_support_3d())
+    aml_set_3d_video_mode(MODE_3D_DISABLE, false, 3);
 
   // never leave vcodec ff/rw or paused.
   if (m_speed != DVD_PLAYSPEED_NORMAL)
