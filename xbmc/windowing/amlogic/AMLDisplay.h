@@ -169,6 +169,7 @@ public:
   bool set_native_resolution(const RESOLUTION_INFO &res, std::string framebuffer_name,
     const RenderStereoMode stereo_mode, bool force_mode_switch, bool hotplug_mode_switch);
   void handle_display_stereo_mode(const RenderStereoMode stereo_mode);
+  void sync_stereo_mode_with_hw();
   bool set_display_resolution(const RESOLUTION_INFO &res, std::string framebuffer_name,
     bool force_mode_switch, bool hotplug_mode_switch);
   int aml_get_display_modes_count(drmModeConnection *connection) const

@@ -1264,6 +1264,13 @@ bool CAMLDisplay::set_native_resolution(const RESOLUTION_INFO &res, std::string 
 {
   bool result = false;
 
+  // Before anything reads m_stereo_mode: the first mode set of a session
+  // whose transmitter is still frame packed (a Kodi restart under a 3D
+  // title - the remote's Stop) must count as leaving 3D below, and the cache
+  // starts UNDEFINED, which the leaving test deliberately ignores. Seeding
+  // inside handle_display_stereo_mode came too late for that.
+  sync_stereo_mode_with_hw();
+
   if (aml_get_cpufamily_id() < AML_T7)
   {
     handle_display_stereo_mode(stereo_mode);
@@ -1323,7 +1330,7 @@ bool CAMLDisplay::set_native_resolution(const RESOLUTION_INFO &res, std::string 
   return result;
 }
 
-void CAMLDisplay::handle_display_stereo_mode(const RenderStereoMode stereo_mode)
+void CAMLDisplay::sync_stereo_mode_with_hw()
 {
   // Read the KERNEL's mode every time, not just when the cache is undefined.
   //
@@ -1372,6 +1379,12 @@ void CAMLDisplay::handle_display_stereo_mode(const RenderStereoMode stereo_mode)
     }
   }
 
+}
+
+void CAMLDisplay::handle_display_stereo_mode(const RenderStereoMode stereo_mode)
+{
+  // m_stereo_mode was brought in line with the transmitter by
+  // sync_stereo_mode_with_hw() at the top of set_native_resolution.
   if (m_stereo_mode != stereo_mode)
   {
     std::string command = "3doff";

@@ -2757,6 +2757,11 @@ void CAMLCodec::CloseDecoder()
 
   SetPollDevice(-1);
 
+  // A shifted frame-packing gap belongs to this title's picture: put the
+  // driver's own back now, not at the next title's first SetVideoRect, so a
+  // Kodi quit right after this (the remote's Stop) leaves nothing behind.
+  SetFramePackingBlank(-1);
+
   // never leave vcodec ff/rw or paused.
   if (m_speed != DVD_PLAYSPEED_NORMAL)
   {
@@ -3950,27 +3955,33 @@ void CAMLCodec::SetVideoSaturation(const int saturation)
 
 void CAMLCodec::SetFramePackingBlank(int blank)
 {
-  // The video driver's frame-packing gap (aml_media framepacking_blank). Its
-  // own value is read once, before the first write, and put back whenever
-  // nothing asks for another: a shifted gap must never outlive the shifted
-  // 3D picture it was set for.
+  // The video driver's frame-packing gap (aml_media framepacking_blank): the
+  // 45 lines of active space between the eyes of 1080p frame packing, which
+  // is also the module's compiled default. A shifted picture asks for 45 + d
+  // (see SetVideoRect); anything else puts the 45 back.
+  //
+  // The default is a constant on purpose. It used to be learnt from the live
+  // value the first time this ran, which is only right while that value is
+  // the driver's own. It is not after a Kodi restart under a shifted 3D
+  // title - the remote's Stop restarts Kodi, so that is routine - and the
+  // new Kodi then took the shifted gap for the default and kept putting it
+  // back for the rest of the boot: measured on the AM9 Pro 2026-10-29, a
+  // 1.85:1 title shifted 21 lines left 66, and the next Kodi played every
+  // frame-packed title with 66 (second eye 10 lines low, 10 lines cropped)
+  // and "restored" 66 after each shift. The live value is compared, not a
+  // cached copy, so a stale gap left by a crash is corrected on the first
+  // call as well.
   static const char* path = "/sys/module/aml_media/parameters/framepacking_blank";
-  static int driverDefault = -1;
-  static int current = -1;
+  static const int kDriverDefault = 45;
   CSysfsPath sysfs(path);
   if (!sysfs.Exists())
     return;
-  if (driverDefault < 0)
-  {
-    driverDefault = sysfs.Get<int>().value_or(45);
-    current = driverDefault;
-  }
-  int want = blank >= 0 ? blank : driverDefault;
+  const int want = blank >= 0 ? blank : kDriverDefault;
+  const int current = sysfs.Get<int>().value_or(-1);
   if (want == current)
     return;
   sysfs.Set(want);
-  current = want;
-  CLog::Log(LOGINFO, "CAMLCodec::SetFramePackingBlank: framepacking_blank {}", want);
+  CLog::Log(LOGINFO, "CAMLCodec::SetFramePackingBlank: framepacking_blank {} -> {}", current, want);
 }
 
 void CAMLCodec::SetVideoRect(const CRect &SrcRect, const CRect &DestRect)
