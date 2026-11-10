@@ -77,12 +77,10 @@ public:
    *        a local or remote repository
    *
    * \param path The path of the game file
-   * \param includeInstallable Also consult game clients that are not
-   *        installed but could be, from the add-on repositories
    *
    * \return true if the path's extension is supported by a known game client
    */
-  static bool HasGameExtension(const std::string& path, bool includeInstallable = true);
+  static bool HasGameExtension(const std::string& path);
 
   /*!
    * \brief Get all game extensions
