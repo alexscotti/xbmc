@@ -368,7 +368,7 @@ void CGameUtils::GetGameClients(const ADDON::VECADDONS& addons,
   }
 }
 
-bool CGameUtils::HasGameExtension(const std::string& path)
+bool CGameUtils::HasGameExtension(const std::string& path, bool includeInstallable)
 {
   using namespace ADDON;
 
@@ -396,6 +396,9 @@ bool CGameUtils::HasGameExtension(const std::string& path)
     if (gc->IsExtensionValid(extension))
       return true;
   }
+
+  if (!includeInstallable)
+    return false;
 
   // Check remote add-ons
   std::lock_guard<std::mutex> installableLock(m_installableMutex);

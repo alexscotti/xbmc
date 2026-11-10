@@ -856,6 +856,13 @@ bool CFileItem::IsGame() const
   if (HasAddonInfo())
     return CGameUtils::IsStandaloneGame(std::const_pointer_cast<ADDON::IAddon>(GetAddonInfo()));
 
+  // A disc image (.iso, .img, ...) is a video disc unless an INSTALLED game
+  // client takes its extension. Counting the repositories' installable game
+  // clients as well hands every DVD image to RetroPlayer on a box with no
+  // emulator, which then aborts ("No compatible game client selected").
+  if (IsDiscImage())
+    return CGameUtils::HasGameExtension(m_strPath, false);
+
   return CGameUtils::HasGameExtension(m_strPath);
 }
 
