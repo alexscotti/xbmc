@@ -414,6 +414,11 @@
               }
             ],
             "default": false
+          },
+          "playerstate": {
+            "type": "string",
+            "default": "",
+            "description": "Disc navigation state to open at (DVD <navstate>, Blu-ray <bluraystate> XML), as a resume would"
           }
         }
       }

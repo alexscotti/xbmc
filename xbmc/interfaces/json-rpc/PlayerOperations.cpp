@@ -1092,6 +1092,13 @@ JSONRPC_STATUS CPlayerOperations::Open(const std::string &method, ITransportLaye
         // Handle "resume" option
         if (list.Size() == 1)
           HandleResumeOption(optionResume, *list[0]);
+        // Handle "playerstate" option: a disc navigation state (DVD <navstate>,
+        // Blu-ray <bluraystate>) to open the disc at, as a resume would. Lets a
+        // caller start one DVD title or Blu-ray playlist without the disc menu.
+        const CVariant& optionPlayerState = options["playerstate"];
+        if (list.Size() == 1 && optionPlayerState.isString() &&
+            !optionPlayerState.asString().empty())
+          list[0]->SetProperty("savedplayerstate", optionPlayerState.asString());
 
         // Playback is posted asynchronously, so nothing after this point can be reported
         // back to the caller. Report an addressable single item that cannot be reached.

@@ -106,7 +106,8 @@ void CApplicationPlay::GetOptionsAndUpdateItem()
   {
     if (m_item.HasProperty("savedplayerstate"))
     {
-      // savedplayerstate is set in CPowerManager on sleep
+      // savedplayerstate is set in CPowerManager on sleep, and by JSON-RPC
+      // Player.Open's "playerstate" option
       m_options.starttime = CUtil::ConvertMilliSecsToSecs(m_item.GetStartOffset());
       m_options.state = m_item.GetProperty("savedplayerstate").asString();
       m_item.ClearProperty("savedplayerstate");
