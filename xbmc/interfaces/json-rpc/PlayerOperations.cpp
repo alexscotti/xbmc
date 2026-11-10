@@ -1098,7 +1098,7 @@ JSONRPC_STATUS CPlayerOperations::Open(const std::string &method, ITransportLaye
         const CVariant& optionPlayerState = options["playerstate"];
         if (list.Size() == 1 && optionPlayerState.isString() &&
             !optionPlayerState.asString().empty())
-          list[0]->SetProperty("savedplayerstate", optionPlayerState.asString());
+          list[0]->SetProperty("openplayerstate", optionPlayerState.asString());
 
         // Playback is posted asynchronously, so nothing after this point can be reported
         // back to the caller. Report an addressable single item that cannot be reached.

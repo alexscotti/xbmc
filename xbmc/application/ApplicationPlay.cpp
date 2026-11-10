@@ -106,8 +106,7 @@ void CApplicationPlay::GetOptionsAndUpdateItem()
   {
     if (m_item.HasProperty("savedplayerstate"))
     {
-      // savedplayerstate is set in CPowerManager on sleep, and by JSON-RPC
-      // Player.Open's "playerstate" option
+      // savedplayerstate is set in CPowerManager on sleep
       m_options.starttime = CUtil::ConvertMilliSecsToSecs(m_item.GetStartOffset());
       m_options.state = m_item.GetProperty("savedplayerstate").asString();
       m_item.ClearProperty("savedplayerstate");
@@ -369,6 +368,19 @@ CApplicationPlay::GatherPlaybackDetailsResult CApplicationPlay::GatherPlaybackDe
     m_options.starttime = CUtil::ConvertMilliSecsToSecs(item.GetStartOffset());
 
     GetOptionsAndUpdateItem();
+
+    // JSON-RPC Player.Open "playerstate": the disc state to open at, in place
+    // of any resume state found above. Applied AFTER the normal update rather
+    // than through savedplayerstate, whose early return skips the video-info
+    // load - and that load is what gives a plain file its video tag. Without
+    // the tag CFileItem::IsGame() decides by extension, and a DVD image (.iso,
+    // which repository game clients list) is handed to RetroPlayer.
+    if (m_item.HasProperty("openplayerstate"))
+    {
+      m_options.state = m_item.GetProperty("openplayerstate").asString();
+      m_options.starttime = 0.0;
+      m_item.ClearProperty("openplayerstate");
+    }
   }
 
   if (!GetPlaylistIfDisc())
