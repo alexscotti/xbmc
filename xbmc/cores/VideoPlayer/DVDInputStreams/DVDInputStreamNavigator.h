@@ -116,6 +116,7 @@ public:
   bool SetState(const std::string &xmlstate) override;
 
   int GetChapter() override { return m_iPart; } // the current part in the current title
+  int GetCurrentTitle() const { return m_iTitle; } // the current title, 0 in a menu
   int GetChapterCount() override { return m_iPartCount; } // the number of parts in the current title
   void GetChapterName(std::string& name, int idx = -1) override {};
   std::chrono::milliseconds GetChapterPos(int ch = -1) override;

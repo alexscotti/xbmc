@@ -7877,7 +7877,16 @@ void CVideoPlayer::UpdatePlayState(double timeout)
       }
       else
 #endif
+      {
         state.isInDiscMenu = state.isInMenu;
+        // A DVD's equivalent of the Blu-ray playlist above: the title (and
+        // part) being played, so a caller can tell which of a TV disc's
+        // episodes is on screen however it was reached ("title=0" in a menu).
+        if (std::shared_ptr<CDVDInputStreamNavigator> nav =
+                std::dynamic_pointer_cast<CDVDInputStreamNavigator>(m_pInputStream))
+          state.discMenuSignals = StringUtils::Format(
+              "title={};part={}", nav->GetCurrentTitle(), nav->GetChapter());
+      }
     }
 
     state.canpause = m_pInputStream->CanPause();

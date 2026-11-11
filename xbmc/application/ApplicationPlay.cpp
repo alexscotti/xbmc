@@ -375,10 +375,11 @@ CApplicationPlay::GatherPlaybackDetailsResult CApplicationPlay::GatherPlaybackDe
     // load - and that load is what gives a plain file its video tag. Without
     // the tag CFileItem::IsGame() decides by extension, and a DVD image (.iso,
     // which repository game clients list) is handed to RetroPlayer.
+    // The start time stands: a "resume" time given beside the state seeks
+    // within the restored title, exactly as Kodi's own DVD resume does.
     if (m_item.HasProperty("openplayerstate"))
     {
       m_options.state = m_item.GetProperty("openplayerstate").asString();
-      m_options.starttime = 0.0;
       m_item.ClearProperty("openplayerstate");
     }
   }
