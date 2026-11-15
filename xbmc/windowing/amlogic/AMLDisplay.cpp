@@ -1053,23 +1053,27 @@ bool CAMLDRMUtils::aml_set_drmDevice_active(std::string mode, int fractional_rat
   drmModeModeInfoPtr drmDevicemode = NULL;
   drmModeModeInfo syntheticMode = {};
 
-  // Re-modeset only when the mode STRING actually changes. A full DRM modeset
-  // (drmModeAtomicCommit with DRM_MODE_ATOMIC_ALLOW_MODESET) re-trains the HDMI/DV
-  // link; forcing it on an already-live mode - e.g. an SDR<->DV switch at an
-  // unchanged resolution, which the amdv/VSIF layer performs without a DRM re-clock -
-  // makes strict sinks drop to black (the Superman BD-J menu-entry regression).
-  // The correct FRAC_RATE_POLICY is still applied here whenever the mode string does
-  // change (it is bundled into the modeset commit below), so switching into a
-  // resolution always lands on the right 23.976/24.000 clock. We deliberately do NOT
-  // re-clock on a frac-only difference at an unchanged mode string: repeated
-  // set_display_resolution calls during a disc's pre-menu video arrive at the same
-  // "...24hz" string with slightly different reported rates (video 23.976 vs GUI
-  // 24.000) and a frac-only re-clock there fires spurious modesets = visible judder
-  // on the opening sequence. Mode-string-only matches the pre-rebase fork (smooth).
-  // Deliberately NOT gated on upstream's force_mode_switch either: forcing a modeset
-  // at an already-live mode string is the BD-J black regression this whole gate fixes.
-  const bool mode_switch_required =
-      !StringUtils::EqualsNoCase(aml_get_drmDevice_mode(), mode);
+  // Re-modeset when the mode STRING changes, or when only its rate does: the
+  // 23.976 and 24.000 (59.94/60, 29.97/30) modes share a name and differ only
+  // in FRAC_RATE_POLICY, which goes out only with a modeset. Gated on the
+  // string alone, a film whose rate differed from the mode already live at
+  // that name (a Blu-ray's 24.000 intro or menu, then its 23.976 feature) kept
+  // the old clock - a repeated or dropped frame every ~42 s for the whole film.
+  // The re-clock at such a change costs a link re-train; the owner chose that
+  // over the cadence error (2026-11-15). A forced modeset at an unchanged name
+  // AND rate is still not done: that is the BD-J menu-entry black (Superman)
+  // the string gate was written for.
+  const int live_fractional_rate =
+      m_connector ? get_drmProp(m_connector->connector_id, "FRAC_RATE_POLICY",
+                                DRM_MODE_OBJECT_CONNECTOR)
+                  : -1;
+  const bool mode_string_changed = !StringUtils::EqualsNoCase(aml_get_drmDevice_mode(), mode);
+  const bool fractional_rate_changed =
+      live_fractional_rate >= 0 && live_fractional_rate != fractional_rate;
+  const bool mode_switch_required = mode_string_changed || fractional_rate_changed;
+  if (!mode_string_changed && fractional_rate_changed)
+    CLog::Log(LOGINFO, "CAMLDRMUtils::{} - {} re-clocked: frac rate policy {} -> {}",
+              __FUNCTION__, mode, live_fractional_rate, fractional_rate);
 
   if (mode_switch_required)
   {
