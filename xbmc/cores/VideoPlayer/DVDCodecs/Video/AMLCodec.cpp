@@ -323,6 +323,9 @@ typedef struct am_packet {
        simply re-send the unit, because AddData rebuilds it from pData/iSize
        and the accepted bytes would be spliced in twice. */
     int           partial_write;
+    /* Bytes accepted by earlier calls for the same access unit, each ended by
+       EAGAIN (which advances data past them). partial_write includes them. */
+    int           accepted_before;
     int           buf_size;
     hdr_buf_t     *hdr;
     codec_para_t  *codec;
@@ -776,9 +779,11 @@ int write_av_packet(am_private_t *para, am_packet_t *pkt)
                 // short-writes 40 KB comes back as 40 KB of duplicated slice
                 // data ahead of the unit, which the parser sees as corruption
                 // while the retry logs as a success.
-                pkt->partial_write = len;
+                // the whole unit's count: an EAGAIN pass before this call
+                // may already have pushed part of it
+                pkt->partial_write = pkt->accepted_before + len;
                 CLog::Log(LOGDEBUG, "write codec data failed! ({:d} of {:d} bytes accepted first)",
-                  len, len + size);
+                  pkt->partial_write, pkt->accepted_before + len + size);
                 return PLAYER_WR_FAILED;
             } else {
                 // adjust for any data we already wrote into codec.
@@ -786,6 +791,7 @@ int write_av_packet(am_private_t *para, am_packet_t *pkt)
                 // with the same pkt because pkt->isvalid has not been cleared.
                 pkt->data += len;
                 pkt->data_size -= len;
+                pkt->accepted_before += len;
                 usleep(RW_WAIT_TIME);
                 CLog::Log(LOGDEBUG, "Codec buffer full, try after {:d} ms, len({:d})",
                   RW_WAIT_TIME / 1000, len);
@@ -3085,6 +3091,7 @@ bool CAMLCodec::AddData(uint8_t *pData, size_t iSize, double dts, double pts)
   am_private->am_pkt.isvalid    = 1;
   am_private->am_pkt.avduration = 0;
   am_private->am_pkt.partial_write = 0;
+  am_private->am_pkt.accepted_before = 0;
   // new AU: its pts has not been checked in yet (see write_av_packet)
   am_private->am_pkt.pts_checkedin = 0;
 
