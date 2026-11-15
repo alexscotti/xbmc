@@ -1406,7 +1406,16 @@ bool CDVDInputStreamNavigator::SetState(const std::string& xmlstate)
     return false;
   }
 
-  m_dll.dvdnav_program_play(m_dvdnav, dvdState.title, dvdState.pgcn, dvdState.pgn);
+  // A title or program the disc does not have (a stale resume record, a bad
+  // Player.Open "playerstate"): the disc stays where it is, and the streams it
+  // names are not applied - the player then opens the default streams.
+  if (m_dll.dvdnav_program_play(m_dvdnav, dvdState.title, dvdState.pgcn, dvdState.pgn) !=
+      DVDNAV_STATUS_OK)
+  {
+    CLog::LogF(LOGWARNING, "Cannot play title {} pgcn {} pgn {}: {}", dvdState.title,
+               dvdState.pgcn, dvdState.pgn, m_dll.dvdnav_err_to_string(m_dvdnav));
+    return false;
+  }
   m_dll.dvdnav_angle_change(m_dvdnav, dvdState.current_angle);
   SetActiveSubtitleStream(dvdState.subp_num);
   SetActiveAudioStream(dvdState.audio_num);
