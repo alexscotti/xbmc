@@ -173,6 +173,13 @@ DemuxPacket* CDemuxMVC::Read()
       continue;
     else if (ret == AVERROR_EOF)
       break;
+    else if (ret < 0)
+    {
+      // A read error (the share went away) leaves pkt empty: retrying it here
+      // spun the player thread forever, with no abort check, and Stop with it
+      CLog::Log(LOGERROR, "CDemuxMVC::{} - av_read_frame failed: {}", __FUNCTION__, ret);
+      break;
+    }
     else if (pkt->size <= 0 || pkt->stream_index != m_nStreamIndex)
     {
       av_packet_unref(pkt);
