@@ -106,6 +106,8 @@ public:
   bool aml_set_drmDevice_active(std::string mode, int fractional_rate,
     const RenderStereoMode stereo_mode, bool active);
   bool aml_get_drmDevice_connected() const { return m_connection == DRM_MODE_CONNECTED; }
+  // the CRTC to read and write properties on, connected or not (0: none)
+  uint32_t CrtcIdForProperties() const;
   bool aml_output_wire_stale();
   void FlipPage(uint32_t fb_id);
 

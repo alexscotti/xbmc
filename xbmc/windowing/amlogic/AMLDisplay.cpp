@@ -255,6 +255,16 @@ void CAMLDRMUtils::CleanAndClose()
   m_connection = DRM_MODE_DISCONNECTED;
 }
 
+uint32_t CAMLDRMUtils::CrtcIdForProperties() const
+{
+  if (m_crtc)
+    return m_crtc->crtc_id;
+  // One CRTC on these SoCs; the forced mode switch takes crtcs[0] the same way
+  if (m_resources && m_resources->count_crtcs > 0)
+    return m_resources->crtcs[0];
+  return 0;
+}
+
 void CAMLDRMUtils::aml_init_drmDevice()
 {
   std::unique_lock<CCriticalSection> lock(m_drmSection);
@@ -880,7 +890,13 @@ int CAMLDRMUtils::aml_get_drmProperty(std::string name,
         if (m_connector)
           id = m_connector->connector_id;
         ret = get_drmProp(id, name, obj_type, data, data_len);
-        [[fallthrough]];
+        return ret;
+      case DRM_MODE_OBJECT_CRTC:
+        // as aml_set_drmProperty: the CRTC's properties are readable whatever
+        // the sink does, and m_crtc is gone while disconnected
+        if ((id = CrtcIdForProperties()) != 0)
+          ret = get_drmProp(id, name, obj_type, data, data_len);
+        return ret;
       default:
         return ret;
     }
@@ -931,12 +947,19 @@ void CAMLDRMUtils::aml_set_drmProperty(std::string name, unsigned int obj_type, 
         // takes to switch to this box as a film starts from the gui - opened
         // 10 Cloverfield Lane's dual-layer DV logo with the core not set up
         // for it, and the decoder wedged (no frame for 5s, three times).
-        if (m_crtc)
+        //
+        // m_crtc is no help here: the connector only reads as disconnected
+        // after aml_init_drmDevice() ran with HPD low, and that freed m_crtc
+        // and skipped the display init, so the CRTC is found by id instead.
+        if (const uint32_t crtcId = CrtcIdForProperties())
         {
           CLog::Log(LOGINFO, "CAMLDRMUtils::{} - applying CRTC property '{}' = {} while "
                     "disconnected", __FUNCTION__, name, value);
-          set_drmProp(m_crtc->crtc_id, name, obj_type, value, NULL);
+          set_drmProp(crtcId, name, obj_type, value, NULL);
         }
+        else
+          CLog::Log(LOGWARNING, "CAMLDRMUtils::{} - no CRTC for property '{}' = {}",
+                    __FUNCTION__, name, value);
         return;
       default:
         return;
@@ -968,12 +991,9 @@ void CAMLDRMUtils::aml_set_drmProperty(std::string name, unsigned int obj_type, 
   std::unique_lock<CCriticalSection> lock(m_drmSection);
   uint32_t mode_blobid = 0;
 
-  if (!aml_get_drmDevice_connected())
-  {
-    CLog::Log(LOGWARNING, "CAMLDRMUtils::{} - connector of drmDevice is not connected", __FUNCTION__);
-    return;
-  }
-
+  // No disconnected check of its own: the numeric setter below applies a CRTC
+  // property while HPD is low and drops only what needs a sink. Dropping here
+  // lost the codec's dv_debug enable_fel/enable_mel in the same window.
   if (drmModeCreatePropertyBlob(m_fd, value.c_str(), value.size(), &mode_blobid))
   {
     CLog::Log(LOGDEBUG, "CAMLDRMUtils::{} - failed to create mode property blob", __FUNCTION__);
@@ -991,6 +1011,9 @@ int CAMLDRMUtils::aml_get_drmDevice_modes_count(drmModeConnection *connection)
 
   if (connection)
     *connection = m_connection;
+
+  if (!m_connector)
+    return 0;
 
   CLog::Log(LOGDEBUG, "CAMLDRMUtils::{} - connector have {:d} modes", __FUNCTION__, m_connector->count_modes);
   mode_count = m_connector->count_modes;
