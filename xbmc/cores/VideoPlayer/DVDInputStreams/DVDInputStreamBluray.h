@@ -77,6 +77,10 @@ struct SBlurayFileSession
 {
   std::string rootPath;
   std::shared_ptr<CBlurayStreamCache> cache;
+  // Stream mode (a disc image): the image itself, read through the cache by
+  // ReadBlocks. Declared after `cache`, so it is released first.
+  std::shared_ptr<CBlurayStreamCache::CView> image;
+  std::mutex imageLock; // the view's position is shared by every read_blocks
 };
 class CDVDOverlayImage;
 class IVideoPlayer;
@@ -865,7 +869,8 @@ protected:
     std::unique_ptr<CDVDInputStreamFile> m_pstream;
     std::string m_rootPath;
 
-    // Read-ahead for a Blu-ray FOLDER on a network share (files mode).
+    // Read-ahead on a network share: the clips of a Blu-ray FOLDER (files
+    // mode), or a disc image read whole (stream mode, `image` set).
     std::unique_ptr<SBlurayFileSession> m_fileSession;
 
 #if defined(HAS_UDFREAD)
@@ -887,7 +892,9 @@ protected:
     void PublishChainHint(unsigned int playItem);
     void ResetIsoCacheAccessPattern();
 
-    /* read-ahead page cache in front of m_pstream (ISO playback only) */
+    /* read-ahead page cache in front of m_pstream (ISO playback only), for an
+     * image the stream cache did not take: a local one, read-ahead off, or
+     * the arena held by another session */
     std::mutex m_isoCacheMutex;
     std::shared_ptr<CBlurayIsoCache> m_isoCache;
     std::atomic<unsigned int> m_isoCacheFallbacks{0};

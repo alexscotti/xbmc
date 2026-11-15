@@ -188,7 +188,8 @@ CDVDInputStreamBluray::~CDVDInputStreamBluray()
 
 void CDVDInputStreamBluray::PublishChainHint(unsigned int playItem)
 {
-  if (!m_fileSession || !m_fileSession->cache)
+  // Clips are files only in files mode; an image is one file to the cache.
+  if (!m_fileSession || !m_fileSession->cache || m_fileSession->image)
     return;
   if (!m_titleInfo || playItem >= m_titleInfo->clip_count)
     return;
@@ -2153,6 +2154,23 @@ int CDVDInputStreamBluray::TakeHeldItemBytes(uint8_t* buf, int buf_size)
 
 int CDVDInputStreamBluray::ReadBlocks(uint8_t* buf, int lba, int num_blocks)
 {
+  if (m_fileSession && m_fileSession->image)
+  {
+    // The image through the stream cache. This thread never enters a network
+    // read: it waits for the worker, and Abort() returns it. There is no
+    // fall-back to m_pstream - it is not open - and none is needed: a page the
+    // worker gives up on is read directly inside the cache.
+    const int64_t size = static_cast<int64_t>(num_blocks) * 2048;
+    if (num_blocks <= 0 || size > std::numeric_limits<int>::max())
+      return -1;
+    std::lock_guard<std::mutex> lock(m_fileSession->imageLock);
+    auto& image = *m_fileSession->image;
+    if (image.Seek(static_cast<int64_t>(lba) * 2048, SEEK_SET) < 0)
+      return -1;
+    const int64_t n = image.Read(buf, static_cast<size_t>(size));
+    return n < 0 ? -1 : static_cast<int>(n / 2048);
+  }
+
   std::shared_ptr<CBlurayIsoCache> cache;
   {
     std::lock_guard<std::mutex> lock(m_isoCacheMutex);
@@ -3973,6 +3991,31 @@ bool CDVDInputStreamBluray::OpenStream(CFileItem &item)
 {
   StopIsoCache();
   m_isoCacheFallbacks = 0;
+  m_fileSession.reset();
+
+  // An image on a network share is read through the stream cache, like a
+  // folder's clips: the player's reads wait on the cache rather than on the
+  // network, Abort() returns them, and a worker stuck in a stalled read is
+  // abandoned rather than joined - none of which CBlurayIsoCache can do, as
+  // its worker and the player share m_pstream. m_pstream is then not opened
+  // at all, so Close() has no handle of ours to close: on smb:// that close
+  // would wait on the lock the stalled read holds.
+  const std::string imagePath = item.GetDynPath();
+  if (auto cache = STREAMCACHE::ClaimFor(imagePath))
+  {
+    if (auto view = cache->OpenFile(imagePath))
+    {
+      m_fileSession = std::make_unique<SBlurayFileSession>();
+      m_fileSession->rootPath = imagePath;
+      m_fileSession->cache = std::move(cache);
+      m_fileSession->image = std::move(view);
+      CLog::Log(LOGINFO, "CDVDInputStreamBluray::OpenStream - {} read through the stream cache",
+                CURL::GetRedacted(imagePath));
+      return true;
+    }
+    CLog::Log(LOGINFO, "CDVDInputStreamBluray::OpenStream - the stream cache could not open {}",
+              CURL::GetRedacted(imagePath));
+  }
 
   m_pstream = std::make_unique<CDVDInputStreamFile>(
       item, XFILE::READ_TRUNCATED | XFILE::READ_BITRATE | XFILE::READ_NO_CACHE);

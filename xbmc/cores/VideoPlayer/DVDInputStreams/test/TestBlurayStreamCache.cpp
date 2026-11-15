@@ -763,3 +763,57 @@ TEST_F(BlurayStreamCacheTest, ARepublishDropsAPrimeThatHasYielded)
   std::this_thread::sleep_for(std::chrono::milliseconds(600));
   EXPECT_LE(second->reads.load(), readsAtDrop) << "a dropped prime kept fetching";
 }
+
+// A disc image read whole (stream mode): libbluray reads its metadata - UDF,
+// index, playlists, clip info - from the same file it streams from, so the
+// stream is interrupted by small reads far away and then resumes. A jump
+// drops the queued window; coming back must re-arm it, and what was already
+// fetched for the stream must still be there.
+TEST_F(BlurayStreamCacheTest, AnImageStreamSurvivesMetadataReadsElsewhere)
+{
+  FakeFile* image = AddFile("disc.iso", 29, 600);
+  auto cache = CBlurayStreamCache::Claim(Config(64), Factory());
+  ASSERT_NE(cache, nullptr);
+  auto view = cache->OpenFile("disc.iso");
+  ASSERT_NE(view, nullptr);
+  image->delayMs.store(2);
+
+  constexpr int64_t BLOCK = 2048;
+  std::vector<uint8_t> buffer(3 * BLOCK * 3); // libbluray's 6144-byte aligned units, x3
+  int64_t position = 100 * static_cast<int64_t>(PAGE); // the m2ts extent
+  const auto streamFor = [&](int reads) {
+    for (int i = 0; i < reads; ++i)
+    {
+      view->Seek(position, SEEK_SET);
+      const int64_t n = view->Read(buffer.data(), buffer.size());
+      ASSERT_GT(n, 0);
+      ASSERT_TRUE(Matches(buffer, static_cast<size_t>(n), image->id, position));
+      position += n;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  };
+
+  // Two reads arm the window: about 57 pages queued, few fetched yet, when
+  // the first metadata read comes - the case where a jump drops real work.
+  streamFor(2);
+  const auto before = cache->GetStats();
+
+  for (int jump = 0; jump < 5; ++jump)
+  {
+    // A clip info lookup near the start of the image, then back to the stream.
+    const int64_t meta = (2 + jump) * static_cast<int64_t>(PAGE);
+    view->Seek(meta, SEEK_SET);
+    ASSERT_GT(view->Read(buffer.data(), BLOCK), 0);
+    ASSERT_TRUE(Matches(buffer, BLOCK, image->id, meta));
+    // ~55 pages each time: 5 of these walk far past the 57-page window that
+    // was full before the first jump, so the window has to have re-armed.
+    streamFor(200);
+  }
+  const auto after = cache->GetStats();
+
+  // Only the metadata reads themselves, and the first stream reads after
+  // each (the window re-arms on the second), may wait. A window that does not
+  // re-arm over what the jump dropped waits on every one of those pages.
+  EXPECT_LE(after.readsWaited - before.readsWaited, 5u * 3u)
+      << "returning to the stream after a metadata read waited on the network";
+}
