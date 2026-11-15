@@ -1115,6 +1115,15 @@ unsigned int CAEStreamParser::SyncDTS(uint8_t* data, unsigned int size)
       else
         header_size = (((data[m_fsize + 5] & 0x1f) << 3) | ((data[m_fsize + 6] & 0xe0) >> 5)) + 1;
 
+      // A substream too small for its own header, or a frame larger than the
+      // parser's buffer, is not a frame (a corrupt read): waiting for it never
+      // ends - the frame cannot be gathered, so AddData consumes nothing, audio
+      // stays silent and the passthrough backlog grows until a flush. Look for
+      // the next sync instead.
+      if (hd_size < header_size + 4 ||
+          static_cast<size_t>(m_fsize) + static_cast<size_t>(hd_size) > sizeof(m_buffer))
+        continue;
+
       // the asset's sync word sits past the substream header, beyond the 10 bytes
       // checked above: wait for them rather than read whatever the buffer held
       if (size - skip < m_fsize + header_size + 4)
@@ -1334,7 +1343,8 @@ unsigned int CAEStreamParser::SyncTrueHD(uint8_t* data, unsigned int size)
         continue;
 
       // if there is not enough data left to verify the packet, just return the skip amount
-      if (left < (unsigned int)m_substreams * 4)
+      // (the check below reads up to 4 bytes for the major sync AND for each substream)
+      if (left < ((unsigned int)m_substreams + 1) * 4)
         return skip;
 
       // verify the parity
