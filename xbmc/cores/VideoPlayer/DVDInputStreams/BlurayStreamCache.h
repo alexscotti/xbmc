@@ -289,8 +289,12 @@ private:
   {
     std::mutex mutex;
     CBlurayStreamCache* owner{nullptr};
-    bool blocked{false};   // inside a source open or read; under `mutex`
+    bool blocked{false};   // inside a source open, read or close; under `mutex`
     bool abandoned{false}; // under `mutex`
+    bool exited{false};    // the thread is done with the cache; under `mutex`
+    // Signalled when `blocked` is set and when the thread exits, which is
+    // what the cache's destructor waits for to decide join or abandon.
+    std::condition_variable changed;
     std::atomic<bool> cancel{false};
     // When the current source call started, in steady-clock ms, or 0 for
     // "not in one". Only says HOW LONG; `blocked` says whether.
@@ -409,6 +413,13 @@ private:
   // touching only `ctx`, for exactly that reason.
   static bool BeginBlocking(WorkerCtx& ctx);
   static bool EndBlocking(WorkerCtx& ctx);
+  // Closes one source (or all, path nullptr). A close is a network call too:
+  // on smb:// smbc_close waits out the timeout on a dead link. Abandonable
+  // like a read, and never refused - the handle is ours to close either way.
+  // Returns false if the worker was abandoned during it.
+  static bool CloseSources(WorkerCtx& ctx, const std::string* path);
+  // Under ctx.mutex: makes the worker abandoned.
+  static void MarkAbandonedLocked(WorkerCtx& ctx);
   // nullptr with `stop` false: the open failed. `stop` true: cancelled or
   // abandoned - return without touching the cache.
   static ISource* GetWorkerSource(WorkerCtx& ctx, const std::string& path, bool& stop);

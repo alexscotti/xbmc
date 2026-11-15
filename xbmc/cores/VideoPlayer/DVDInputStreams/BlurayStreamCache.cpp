@@ -165,24 +165,53 @@ CBlurayStreamCache::~CBlurayStreamCache()
   Abort();
   LogStats("close");
 
+  std::shared_ptr<WorkerCtx> ctx;
   {
-    std::unique_lock<std::mutex> lock(m_queueMutex);
+    std::lock_guard<std::mutex> lock(m_queueMutex);
     m_stopWorker = true;
     m_window.clear();
     m_primes.clear();
     m_queued.clear();
-
-    // Inside a source open or read: leave it running rather than make the
-    // close wait out the network. It owns its own handle and buffer, and once
-    // abandoned it cannot touch anything of ours again. A worker that is not
-    // inside one is only ever a moment from noticing the stop, so it is
-    // joined - and must be, since it may be using the cache right now.
-    if (m_workerCtx && g_abandonedRunning.load() < m_config.abandonMax)
-      AbandonIfBlockedLocked(lock, "close", 0);
+    ctx = m_workerCtx;
+    m_workerCtx.reset();
   }
   m_queueChanged.notify_all();
 
-  if (m_worker.joinable())
+  bool abandon = false;
+  if (ctx)
+  {
+    // Join or abandon is decided only once the worker has either exited or
+    // entered a source call. Deciding earlier - on whether it happens to be
+    // inside one at this instant - joined a worker a moment before it started
+    // closing its sources after the Abort, and on smb:// that close waits out
+    // the network: measured on the box as the whole ~26 s Stop freeze this
+    // class exists to remove. The worker reaches one or the other promptly:
+    // it is cancelled, and every wait it makes outside a source call wakes on
+    // the stop.
+    std::unique_lock<std::mutex> lock(ctx->mutex);
+    ctx->changed.wait(lock, [&] { return ctx->exited || ctx->blocked; });
+    if (!ctx->exited && g_abandonedRunning.load() < m_config.abandonMax)
+    {
+      // It owns its own handle and buffer, and once abandoned it cannot
+      // touch anything of ours again.
+      MarkAbandonedLocked(*ctx);
+      abandon = true;
+    }
+  }
+
+  if (abandon)
+  {
+    m_worker.detach();
+    {
+      std::lock_guard<std::mutex> lock(m_statsMutex);
+      ++m_stats.workersAbandoned;
+    }
+    CLog::Log(LOGINFO,
+              "CBlurayStreamCache - worker abandoned (close), it is stuck in a source call; {} "
+              "of {} still running",
+              g_abandonedRunning.load(), m_config.abandonMax);
+  }
+  else if (m_worker.joinable())
     m_worker.join();
 
   {
@@ -1020,12 +1049,7 @@ bool CBlurayStreamCache::AbandonIfBlockedLocked(std::unique_lock<std::mutex>& qu
     const int64_t since = ctx->blockedSinceMs.load();
     if (since == 0 || NowMs() - since < minBlockedMs)
       return false;
-    ctx->owner = nullptr;
-    ctx->abandoned = true;
-    ctx->cancel.store(true);
-    // Counted here, under ctx->mutex, and uncounted by the thread under the
-    // same lock as it exits, so the two can never miss each other.
-    ++g_abandonedRunning;
+    MarkAbandonedLocked(*ctx);
   }
 
   m_workerCtx.reset();
@@ -1047,6 +1071,16 @@ bool CBlurayStreamCache::AbandonIfBlockedLocked(std::unique_lock<std::mutex>& qu
   return true;
 }
 
+void CBlurayStreamCache::MarkAbandonedLocked(WorkerCtx& ctx)
+{
+  ctx.owner = nullptr;
+  ctx.abandoned = true;
+  ctx.cancel.store(true);
+  // Counted here, under ctx.mutex, and uncounted by the thread under the
+  // same lock as it exits, so the two can never miss each other.
+  ++g_abandonedRunning;
+}
+
 void CBlurayStreamCache::Worker(std::shared_ptr<WorkerCtx> ctx)
 {
   while (!ctx->cancel.load())
@@ -1065,12 +1099,17 @@ void CBlurayStreamCache::Worker(std::shared_ptr<WorkerCtx> ctx)
       break;
   }
 
-  // Sources are closed here, on this thread, so an abandoned worker's close
-  // - which on smb:// takes the same process-wide lock - is its own wait.
-  ctx->sources.clear();
-  std::lock_guard<std::mutex> lock(ctx->mutex);
-  if (ctx->abandoned)
-    --g_abandonedRunning;
+  // Sources are closed here, on this thread, as an abandonable call: on a
+  // dead link the close is what takes the time, and it is nobody's wait but
+  // this thread's.
+  CloseSources(*ctx, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(ctx->mutex);
+    ctx->exited = true;
+    if (ctx->abandoned)
+      --g_abandonedRunning;
+  }
+  ctx->changed.notify_all();
 }
 
 bool CBlurayStreamCache::BeginBlocking(WorkerCtx& ctx)
@@ -1080,7 +1119,23 @@ bool CBlurayStreamCache::BeginBlocking(WorkerCtx& ctx)
     return false;
   ctx.blocked = true;
   ctx.blockedSinceMs.store(NowMs());
+  ctx.changed.notify_all();
   return true;
+}
+
+bool CBlurayStreamCache::CloseSources(WorkerCtx& ctx, const std::string* path)
+{
+  {
+    std::lock_guard<std::mutex> lock(ctx.mutex);
+    ctx.blocked = true;
+    ctx.blockedSinceMs.store(NowMs());
+  }
+  ctx.changed.notify_all();
+  if (path)
+    ctx.sources.erase(*path);
+  else
+    ctx.sources.clear();
+  return EndBlocking(ctx);
 }
 
 bool CBlurayStreamCache::EndBlocking(WorkerCtx& ctx)
@@ -1102,8 +1157,11 @@ CBlurayStreamCache::ISource* CBlurayStreamCache::GetWorkerSource(WorkerCtx& ctx,
 
   // Two is enough for the current clip and the one being primed; anything
   // older is a retained file nobody is reading.
-  if (ctx.sources.size() >= 2)
-    ctx.sources.clear();
+  if (ctx.sources.size() >= 2 && !CloseSources(ctx, nullptr))
+  {
+    stop = true;
+    return nullptr;
+  }
 
   // An open is a network call like any read: on smb:// it waits on the
   // process-wide lock behind any stuck read, so it is abandonable the same way.
@@ -1187,7 +1245,8 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
     // Short or failed. Drop the handle - on this link that is usually a
     // transient the next open rides through - and back off before retrying,
     // rather than reporting it as the end of the file.
-    ctx.sources.erase(work.file->path);
+    if (!CloseSources(ctx, &work.file->path))
+      return false;
     read = -1;
     {
       std::lock_guard<std::mutex> statsLock(m_statsMutex);
@@ -1321,7 +1380,7 @@ void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const PrimeJob& job)
 
     if (read != static_cast<int64_t>(want))
     {
-      ctx.sources.erase(path);
+      CloseSources(ctx, &path);
       return; // a prime is best effort; the boundary just stays cold
     }
 

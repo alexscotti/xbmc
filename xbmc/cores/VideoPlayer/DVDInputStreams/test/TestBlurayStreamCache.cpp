@@ -42,6 +42,8 @@ struct FakeFile
   std::atomic<bool> stalled{false}; // every read blocks: a NAS outage
   std::atomic<int> failNextReads{0};
   std::atomic<int> delayMs{0}; // every read takes this long: a slow link
+  // A close blocks while stalled too, as smbc_close does on a dead link.
+  std::atomic<bool> closeStalls{false};
   // Pages of this file the source has been asked for, in order.
   std::mutex readLog;
   std::vector<int64_t> pagesRead;
@@ -60,6 +62,15 @@ public:
     if (m_file->processLock)
       lock = std::unique_lock<std::mutex>(*m_file->processLock);
     ++m_file->opens;
+  }
+
+  ~CFakeSource() override
+  {
+    std::unique_lock<std::mutex> lock;
+    if (m_file->processLock)
+      lock = std::unique_lock<std::mutex>(*m_file->processLock);
+    while (m_file->closeStalls.load() && m_file->stalled.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
 
   int64_t GetLength() override { return m_file->length; }
@@ -816,4 +827,38 @@ TEST_F(BlurayStreamCacheTest, AnImageStreamSurvivesMetadataReadsElsewhere)
   // re-arm over what the jump dropped waits on every one of those pages.
   EXPECT_LE(after.readsWaited - before.readsWaited, 5u * 3u)
       << "returning to the stream after a metadata read waited on the network";
+}
+
+// Measured on the box: Stop during an outage with the worker IDLE (the window
+// full, no read in flight). Abort cancels it, it leaves its loop and closes
+// its sources - and on smb:// a close is a network call that waits out the
+// timeout. The close must be abandonable like a read, and the destructor must
+// not join a worker that is about to start one.
+TEST_F(BlurayStreamCacheTest, CloseDoesNotWaitForAWorkerClosingItsSources)
+{
+  FakeFile* clip = AddFile("clip", 30, 40);
+  clip->closeStalls.store(true);
+  auto cache = CBlurayStreamCache::Claim(Config(64), Factory());
+  ASSERT_NE(cache, nullptr);
+  auto view = cache->OpenFile("clip");
+
+  std::vector<uint8_t> buffer(4096);
+  for (int i = 0; i < 40; ++i)
+    view->Read(buffer.data(), buffer.size());
+  std::this_thread::sleep_for(std::chrono::milliseconds(200)); // whole file resident: worker idle
+
+  clip->stalled.store(true);
+  std::thread link([clip] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    clip->stalled.store(false);
+  });
+  cache->Abort();
+  view.reset();
+  const auto start = std::chrono::steady_clock::now();
+  cache.reset();
+  const int64_t ms = MsSince(start);
+  clip->stalled.store(false);
+  link.join();
+  EXPECT_LT(ms, 250) << "close waited for the worker's close of its source";
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
 }
