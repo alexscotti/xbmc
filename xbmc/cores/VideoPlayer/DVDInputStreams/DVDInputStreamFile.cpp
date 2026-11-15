@@ -50,7 +50,7 @@ void CDVDInputStreamFile::Abort()
 
 bool CDVDInputStreamFile::IsEOF()
 {
-  return !m_pFile || m_eof;
+  return (!m_pFile && !m_streamView) || m_eof;
 }
 
 bool CDVDInputStreamFile::Open()
@@ -123,6 +123,20 @@ bool CDVDInputStreamFile::Open()
   if (m_pFile->GetImplementation() && (content.empty() || content == "application/octet-stream"))
     m_content = m_pFile->GetImplementation()->GetProperty(XFILE::FileProperty::CONTENT_TYPE);
 
+  if (m_streamView)
+  {
+    // Nothing reads through m_pFile once the view is up, so it is closed now,
+    // while the share is known to be answering. Kept open, its close would
+    // run at Stop: on smb:// that takes the process-wide lock a worker stuck
+    // in a stalled read is holding, and Stop would wait out the network
+    // after the cache had abandoned that worker precisely so it would not.
+    m_seekPossible = m_pFile->IoControl(IOControl::SEEK_POSSIBLE, nullptr);
+    m_chunkSize = m_pFile->GetChunkSize();
+    m_pFile->Close();
+    delete m_pFile;
+    m_pFile = nullptr;
+  }
+
   m_eof = false;
   return true;
 }
@@ -175,18 +189,20 @@ int CDVDInputStreamFile::Read(uint8_t* buf, int buf_size)
 
 int64_t CDVDInputStreamFile::Seek(int64_t offset, int whence)
 {
-  if(!m_pFile) return -1;
-
-  if (whence == DVDSTREAM_SEEK_POSSIBLE)
-    return m_pFile->IoControl(IOControl::SEEK_POSSIBLE, nullptr);
-
   if (m_streamView)
   {
+    if (whence == DVDSTREAM_SEEK_POSSIBLE)
+      return m_seekPossible;
     const int64_t ret = m_streamView->Seek(offset, whence);
     if (ret >= 0)
       m_eof = false;
     return ret;
   }
+
+  if(!m_pFile) return -1;
+
+  if (whence == DVDSTREAM_SEEK_POSSIBLE)
+    return m_pFile->IoControl(IOControl::SEEK_POSSIBLE, nullptr);
 
   int64_t ret = m_pFile->Seek(offset, whence);
 
@@ -244,7 +260,7 @@ BitstreamStats CDVDInputStreamFile::GetBitstreamStats() const
 // otherwise defaults to 64K
 int CDVDInputStreamFile::GetBlockSize()
 {
-  int chunk = 0;
+  int chunk = m_streamView ? m_chunkSize : 0;
   if (m_pFile)
     chunk = m_pFile->GetChunkSize();
 
@@ -256,7 +272,7 @@ void CDVDInputStreamFile::SetReadRate(uint32_t rate)
   // Increase requested rate by 10%:
   uint32_t maxrate = static_cast<uint32_t>(1.1 * rate);
 
-  if (m_pFile->IoControl(IOControl::CACHE_SETRATE, &maxrate) >= 0)
+  if (m_pFile && m_pFile->IoControl(IOControl::CACHE_SETRATE, &maxrate) >= 0)
     CLog::Log(LOGDEBUG,
               "CDVDInputStreamFile::SetReadRate - set cache throttle rate to {} bytes per second",
               maxrate);

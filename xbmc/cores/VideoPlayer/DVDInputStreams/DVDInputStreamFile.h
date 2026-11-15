@@ -35,10 +35,14 @@ protected:
   unsigned int m_flags = 0;
 
   // Read-ahead for a single video file on a network share, in place of
-  // CFileCache (plan section 1b). When this is set, m_pFile is not used for
-  // reading at all: the cache owns its own handles, so a Stop while the share
-  // is away does not have to wait for a cache thread stuck in a read, which
-  // is what CFileCache's Close does today.
+  // CFileCache (plan section 1b). When this is set, m_pFile is closed at the
+  // end of Open and is null: the cache owns its own handles, so a Stop while
+  // the share is away does not have to wait for a cache thread stuck in a
+  // read, which is what CFileCache's Close does today - nor for a close of a
+  // handle of ours, which on smb:// waits on the same lock that read holds.
   std::shared_ptr<CBlurayStreamCache> m_streamCache;
   std::shared_ptr<CBlurayStreamCache::CView> m_streamView;
+  // What m_pFile answered before it was closed.
+  int64_t m_seekPossible = 0;
+  int m_chunkSize = 0;
 };
