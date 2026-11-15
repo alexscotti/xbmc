@@ -164,6 +164,8 @@ private:
   std::list<DLDemuxPacket> m_packages;
 
   uint32_t m_metadataToken{0};
+  // ownership of the DV active-area detection (aml_dv_detect_claim)
+  uint64_t m_detectToken{0};
   bool m_metaLeadLogged{false};
   bool m_stripHdr10Plus{false};
   bool m_dualLayer{false};

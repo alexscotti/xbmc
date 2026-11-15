@@ -229,6 +229,12 @@ enum DvDetectState
 void aml_dv_detect_set_file(const std::string& path);
 void aml_dv_detect_active_area_start();
 void aml_dv_detect_active_area_stop();
+// The active-area state (scan or geometric offsets) belongs to the codec that
+// last configured it. A codec claims it before configuring it, and on close
+// releases it - which stops the scan only if nobody has claimed it since: on a
+// codec change the new codec opens before the old one closes.
+uint64_t aml_dv_detect_claim();
+void aml_dv_detect_release(uint64_t token);
 // Geometric letterbox for hard-cropped (non-16:9 coded) content: derive the
 // display-scaling bars from the coded resolution and publish them as the
 // active-area offsets (no pixel scan). Applied in Source/Auto (not Zero).

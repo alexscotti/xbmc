@@ -453,6 +453,7 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStreamInfo &hints, CDVDCodecOptions &option
             const int cw = m_hints.width, ch = m_hints.height;
             const bool preCropped = realDV && cw > 0 && ch > 0 &&
                                     ((cw * 9 / 16 > ch + 40) || (ch * 16 / 9 > cw + 40));
+            m_detectToken = aml_dv_detect_claim();
             if (l5mode != 1 /*Zero*/ && preCropped)
             {
               aml_dv_detect_active_area_stop();          // no scan needed
@@ -662,8 +663,12 @@ void CDVDVideoCodecAmlogic::Close(void)
     m_metadataToken = 0;
   }
 
-  // Stop any in-flight L5 active-area detection thread.
-  aml_dv_detect_active_area_stop();
+  // Stop the L5 active-area detection this codec configured - unless a
+  // successor has configured it since: a codec change opens the new codec
+  // before this one closes, and stopping here then killed the new stream's
+  // scan or geometric offsets (no L5 letterbox after a menu-to-feature move).
+  aml_dv_detect_release(m_detectToken);
+  m_detectToken = 0;
 
   // Any BL/EL packets still awaiting a partner are ours to free - Reset() and
   // Reopen() drained this list but Close() never did, so every stop with a

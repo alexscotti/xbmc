@@ -1542,6 +1542,8 @@ int aml_display_vsvdb_max_nits()
 // CBitstreamConverter).
 
 static std::atomic<bool> s_detectStable{false};
+static std::atomic<uint64_t> s_detectOwner{0};
+static std::atomic<uint64_t> s_detectLastToken{0};
 static std::atomic<int> s_detectState{DV_DETECT_FAILED};
 static std::atomic<uint16_t> s_detectedTop{0};
 static std::atomic<uint16_t> s_detectedBottom{0};
@@ -2244,6 +2246,19 @@ void aml_dv_detect_active_area_stop()
   s_detectState.store(DV_DETECT_FAILED);
   if (s_detectThread.joinable())
     s_detectThread.join();
+}
+
+uint64_t aml_dv_detect_claim()
+{
+  const uint64_t token = ++s_detectLastToken;
+  s_detectOwner.store(token);
+  return token;
+}
+
+void aml_dv_detect_release(uint64_t token)
+{
+  if (token != 0 && s_detectOwner.compare_exchange_strong(token, 0))
+    aml_dv_detect_active_area_stop();
 }
 
 void aml_dv_set_geometric_active_area(int codedW, int codedH)
