@@ -275,17 +275,34 @@ void CWinSystemAmlogic::HotplugEvent()
   {
     // The same mode the film was using: name, refresh rate (the fractional
     // rates share a name with the integer ones) and 3D layout.
+    //
+    // Failing that, the same mode without its 3D layout: the stereo mode is
+    // kept whatever is chosen here, and a 1080p mode under frame packing is
+    // what the film needs (AMLDisplay doubles it), whereas the boot-time
+    // preferred mode (2160p) under frame packing is the 3840x4410 black
+    // screen the exact match exists to avoid.
     RESOLUTION keep = RES_INVALID;
+    RESOLUTION sameMode = RES_INVALID;
     for (size_t r = RES_DESKTOP; r < CDisplaySettings::GetInstance().ResolutionInfoSize(); r++)
     {
       const RESOLUTION_INFO& info = CDisplaySettings::GetInstance().GetResolutionInfo(r);
-      if (StringUtils::EqualsNoCase(info.strId, playingRes.strId) &&
-          std::fabs(info.fRefreshRate - playingRes.fRefreshRate) < 0.01f &&
-          (info.dwFlags & D3DPRESENTFLAG_MODEMASK) == (playingRes.dwFlags & D3DPRESENTFLAG_MODEMASK))
+      if (!StringUtils::EqualsNoCase(info.strId, playingRes.strId) ||
+          std::fabs(info.fRefreshRate - playingRes.fRefreshRate) >= 0.01f)
+        continue;
+      if ((info.dwFlags & D3DPRESENTFLAG_MODEMASK) == (playingRes.dwFlags & D3DPRESENTFLAG_MODEMASK))
       {
         keep = static_cast<RESOLUTION>(r);
         break;
       }
+      if (sameMode == RES_INVALID)
+        sameMode = static_cast<RESOLUTION>(r);
+    }
+    if (keep == RES_INVALID && sameMode != RES_INVALID)
+    {
+      CLog::Log(LOGWARNING, "CWinSystemAmlogic - HotplugEvent during playback, video's mode {} "
+                "not offered with its 3D layout after reconnect, keeping the mode: {}",
+                playingRes.strMode, CDisplaySettings::GetInstance().GetResolutionInfo(sameMode).strMode);
+      keep = sameMode;
     }
     if (keep != RES_INVALID)
     {
