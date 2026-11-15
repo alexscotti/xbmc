@@ -90,7 +90,8 @@ public:
     unsigned int abandonAfterMs{5000};
     // Bound on abandoned threads still running, across every session: one
     // whose read has since returned has exited and no longer counts. Past
-    // it, a stuck worker is not replaced and close waits for it.
+    // it, a stuck worker is not replaced mid-session. Close abandons a stuck
+    // worker regardless, so a Stop never waits for the network.
     unsigned int abandonMax{4};
     // Within this much of a clip's end, start pulling the head of the next
     // clip; this much of it. 0 disables chaining.

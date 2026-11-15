@@ -395,6 +395,42 @@ TEST_F(BlurayStreamCacheTest, CloseDoesNotWaitForAStuckWorker)
   std::this_thread::sleep_for(std::chrono::milliseconds(100)); // let the orphan exit
 }
 
+// A continuous outage uses up abandonMax with mid-session replacements; the
+// Stop after that must still not wait for the network.
+TEST_F(BlurayStreamCacheTest, CloseDoesNotWaitWhenTheAbandonLimitIsReached)
+{
+  FakeFile* clip = AddFile("clip", 24, 100);
+  CBlurayStreamCache::Config config = Config();
+  config.abandonMax = 1;
+  auto cache = CBlurayStreamCache::Claim(config, Factory());
+  ASSERT_NE(cache, nullptr);
+  auto view = cache->OpenFile("clip");
+
+  std::vector<uint8_t> buffer(4096);
+  view->Read(buffer.data(), buffer.size());
+  clip->stalled.store(true);
+  view->Seek(50 * static_cast<int64_t>(PAGE), SEEK_SET);
+
+  std::thread reader([&] {
+    std::vector<uint8_t> b(4096);
+    view->Read(b.data(), b.size());
+  });
+  // Past abandonAfterMs: the stuck worker is replaced, using the one slot, and
+  // the replacement gets stuck in turn
+  std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  EXPECT_EQ(cache->GetStats().workersAbandoned, 1u);
+  cache->Abort();
+  reader.join();
+  view.reset();
+
+  const auto start = std::chrono::steady_clock::now();
+  cache.reset();
+  EXPECT_LT(MsSince(start), 250) << "close joined a worker stuck in the network";
+
+  clip->stalled.store(false);
+  std::this_thread::sleep_for(std::chrono::milliseconds(150)); // let the orphans exit
+}
+
 TEST_F(BlurayStreamCacheTest, ThePrimedNextClipCostsNoOpenAndNoWaitAtTheBoundary)
 {
   FakeFile* first = AddFile("clipA", 13, 12);

@@ -191,7 +191,11 @@ CBlurayStreamCache::~CBlurayStreamCache()
     // the stop.
     std::unique_lock<std::mutex> lock(ctx->mutex);
     ctx->changed.wait(lock, [&] { return ctx->exited || ctx->blocked; });
-    if (!ctx->exited && g_abandonedRunning.load() < m_config.abandonMax)
+    // Close abandons whatever the count. abandonMax bounds the replacements a
+    // stall makes mid-session, and a continuous outage uses it up in ~20 s;
+    // holding close to it too made the Stop after that wait out the rest of
+    // the outage. One thread per Stop is bounded by the Stops made.
+    if (!ctx->exited)
     {
       // It owns its own handle and buffer, and once abandoned it cannot
       // touch anything of ours again.
@@ -209,7 +213,7 @@ CBlurayStreamCache::~CBlurayStreamCache()
     }
     CLog::Log(LOGINFO,
               "CBlurayStreamCache - worker abandoned (close), it is stuck in a source call; {} "
-              "of {} still running",
+              "still running (mid-session limit {})",
               g_abandonedRunning.load(), m_config.abandonMax);
   }
   else if (m_worker.joinable())
