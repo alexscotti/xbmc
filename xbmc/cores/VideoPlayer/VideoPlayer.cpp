@@ -8210,7 +8210,9 @@ void CVideoPlayer::GetDebugInfo(std::string &audio, std::string &video, std::str
 
 std::string CVideoPlayer::GetReadAheadDebugInfo()
 {
-  return m_pInputStream ? m_pInputStream->GetReadAheadInfo() : std::string();
+  // Called from the render thread, while the player thread can replace or
+  // free m_pInputStream: the line the player thread publishes is read instead.
+  return CServiceBroker::GetDataCacheCore().GetReadAheadInfo();
 }
 
 void CVideoPlayer::UpdateReadAheadInfo()
