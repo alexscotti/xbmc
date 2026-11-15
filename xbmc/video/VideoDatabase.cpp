@@ -607,7 +607,10 @@ int CVideoDatabase::AddOrUpdateFile(const std::string& fileAndPath,
   std::string sql;
   try
   {
-    const CDateTime finalDateAdded{GetDateAdded(fileAndPath, fileInfo.m_dateAdded)};
+    const CDateTime finalDateAdded{
+        m_dateAddedIsNow
+            ? (fileInfo.m_dateAdded.IsValid() ? fileInfo.m_dateAdded : CDateTime::GetCurrentDateTime())
+            : GetDateAdded(fileAndPath, fileInfo.m_dateAdded)};
 
     std::string strFileName;
     std::string strPath;

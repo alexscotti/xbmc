@@ -86,6 +86,8 @@ void CSaveFileState::DoWork(CFileItem& item,
       CLog::Log(LOGDEBUG, "{} - Saving file state for video item {}", __FUNCTION__, redactPath);
 
       CVideoDatabase videodatabase;
+      // Runs when playback stops: never stat the file (see SetDateAddedIsNow).
+      videodatabase.SetDateAddedIsNow(true);
       if (!videodatabase.Open())
       {
         CLog::Log(LOGWARNING, "{} - Unable to open video database. Can not save file state!",

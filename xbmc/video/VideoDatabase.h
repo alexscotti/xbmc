@@ -198,6 +198,16 @@ public:
   ~CVideoDatabase() override;
 
   bool Open() override;
+
+  /*! \brief Files this instance adds to the database get the current time as their date added,
+   instead of the file's own mtime/ctime: no stat of the file at all.
+   For the stop path. Stopping playback saves the settings, resume point and play count, adding
+   the file if it is not in the database yet - and the stat that dates it runs on every Stop,
+   since the date is worked out before the row is looked up. On a network share during an
+   outage that stat waits out the SMB timeout, while the main thread waits for it in
+   ~CVideoPlayer: the GUI freezes for the whole outage. A file a library scan adds is still
+   dated by its mtime. */
+  void SetDateAddedIsNow(bool now) { m_dateAddedIsNow = now; }
   bool CommitTransaction() override;
 
   int AddNewEpisode(int idShow, CVideoInfoTag& details);
@@ -1334,4 +1344,6 @@ private:
   static void AnnounceRemove(const std::string& content, int id, bool scanning = false);
 
   static CDateTime GetDateAdded(const std::string& filename, CDateTime dateAdded = CDateTime());
+
+  bool m_dateAddedIsNow{false};
 };

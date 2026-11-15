@@ -532,6 +532,8 @@ void CApplicationPlayerCallback::StoreVideoSettings(const CFileItem& fileItem,
   CVideoDatabase dbs;
   if (dbs.Open())
   {
+    // Called when playback stops: never stat the file (see SetDateAddedIsNow).
+    dbs.SetDateAddedIsNow(true);
     if (vs != CMediaSettings::GetInstance().GetDefaultVideoSettings())
     {
       dbs.SetVideoSettings(fileItem, vs);
