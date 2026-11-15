@@ -97,3 +97,26 @@ TEST(TestHevcSei, PayloadSizeMultiplicationOverflow)
   EXPECT_FALSE(containsHdr10Plus);
   EXPECT_TRUE(result.empty());
 }
+
+TEST(TestHevcSei, RemoveHdr10PlusKeepsOtherNals)
+{
+  // A mastering display message alone: no HDR10+, so the NAL is to be kept as it is
+  const std::vector<uint8_t> nal{SEI_HEADER_0, SEI_HEADER_1, 0x89, 0x03, 0x11, 0x22, 0x33, 0x80};
+
+  const auto [containsHdr10Plus, result] =
+      CHevcSei::RemoveHdr10PlusFromSeiNalu(nal.data(), nal.size());
+  EXPECT_FALSE(containsHdr10Plus);
+  EXPECT_TRUE(result.empty());
+}
+
+TEST(TestHevcSei, RemoveHdr10PlusOnlyMessage)
+{
+  // An HDR10+ message alone: the NAL is to be dropped
+  const std::vector<uint8_t> nal{SEI_HEADER_0, SEI_HEADER_1, 0x04, 0x07, 0xB5, 0x00,
+                                 0x3C,         0x00,         0x01, 0x04, 0x01, 0x80};
+
+  const auto [containsHdr10Plus, result] =
+      CHevcSei::RemoveHdr10PlusFromSeiNalu(nal.data(), nal.size());
+  EXPECT_TRUE(containsHdr10Plus);
+  EXPECT_TRUE(result.empty());
+}

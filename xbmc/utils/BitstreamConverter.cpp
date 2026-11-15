@@ -1921,7 +1921,7 @@ bool CBitstreamConverter::BitstreamConvert(uint8_t* pData,
             have_hdr10plus_meta = true;
             m_IsHdr10Plus = true;
 
-            finalPrefixSeiNalu = CHevcSei::RemoveHdr10PlusFromSeiNalu(buf, nal_size);
+            finalPrefixSeiNalu = CHevcSei::RemoveHdr10PlusFromSeiNalu(buf, nal_size).second;
             if (!finalPrefixSeiNalu.empty())
             {
               buf_to_write = finalPrefixSeiNalu.data();
@@ -1935,16 +1935,22 @@ bool CBitstreamConverter::BitstreamConvert(uint8_t* pData,
         }
         else if (m_removeHdr10Plus)
         {
-          finalPrefixSeiNalu = CHevcSei::RemoveHdr10PlusFromSeiNalu(buf, nal_size);
-
-          if (!finalPrefixSeiNalu.empty())
+          // Only a NAL that holds HDR10+ changes: the others carry the static
+          // metadata (mastering display, content light level, HLG's alternative
+          // transfer), which must still reach the decoder
+          auto [hasHdr10Plus, stripped] = CHevcSei::RemoveHdr10PlusFromSeiNalu(buf, nal_size);
+          if (hasHdr10Plus)
           {
-            buf_to_write = finalPrefixSeiNalu.data();
-            final_nal_size = finalPrefixSeiNalu.size();
-          }
-          else
-          {
-            write_buf = false;
+            finalPrefixSeiNalu = std::move(stripped);
+            if (!finalPrefixSeiNalu.empty())
+            {
+              buf_to_write = finalPrefixSeiNalu.data();
+              final_nal_size = finalPrefixSeiNalu.size();
+            }
+            else
+            {
+              write_buf = false;
+            }
           }
         }
       }
