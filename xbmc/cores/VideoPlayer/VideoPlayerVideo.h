@@ -20,6 +20,7 @@
 #include "utils/BitstreamStats.h"
 
 #include <atomic>
+#include <mutex>
 
 #define DROP_DROPPED 1
 #define DROP_VERYLATE 2
@@ -74,7 +75,7 @@ public:
   std::string GetPlayerInfo() override;
   int GetVideoBitrate() override;
   void SetSpeed(int iSpeed) override;
-  bool SupportsExtention() const override { return m_pVideoCodec && m_pVideoCodec->SupportsExtention(); }
+  bool SupportsExtention() const override;
 
   int  GetDataLevel() const { return m_messageQueue.GetLevel(true); }
   void SetMaxDataSize(int iMaxDataSize) { m_messageQueue.SetMaxDataSize(iMaxDataSize); }
@@ -151,6 +152,12 @@ protected:
   CDVDMessageQueue& m_messageParent;
   CDVDStreamInfo m_hints;
   std::unique_ptr<CDVDVideoCodec> m_pVideoCodec;
+  // The video thread replaces m_pVideoCodec (an in-queue codec change, close);
+  // the player thread (Flush, HasData) and the GUI thread (GetPlayerInfo) use
+  // it too. Replaced, and used from those other threads, under this lock; an
+  // old codec is destroyed outside it.
+  mutable std::mutex m_codecMutex;
+  void ReplaceCodec(std::unique_ptr<CDVDVideoCodec> codec);
   CPtsTracker m_ptsTracker;
   std::list<DVDMessageListItem> m_packets;
   CDroppingStats m_droppingStats;

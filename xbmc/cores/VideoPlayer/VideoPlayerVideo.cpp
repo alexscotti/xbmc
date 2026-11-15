@@ -217,10 +217,11 @@ void CVideoPlayerVideo::OpenStream(CDVDStreamInfo& hint, std::unique_ptr<CDVDVid
   if (m_pVideoCodec && m_pVideoCodec->Reconfigure(hint))
   {
     // reuse old decoder
+    std::lock_guard<std::mutex> lock(m_codecMutex);
     codec = std::move(m_pVideoCodec);
   }
 
-  m_pVideoCodec.reset();
+  ReplaceCodec(nullptr);
 
   if (!codec)
   {
@@ -236,7 +237,7 @@ void CVideoPlayerVideo::OpenStream(CDVDStreamInfo& hint, std::unique_ptr<CDVDVid
     }
   }
 
-  m_pVideoCodec = std::move(codec);
+  ReplaceCodec(std::move(codec));
   m_hints = hint;
   m_stalled = m_messageQueue.GetPacketCount(CDVDMsg::DEMUXER_PACKET) == 0;
   m_rewindStalled = false;
@@ -299,13 +300,32 @@ void CVideoPlayerVideo::CloseStream(bool bWaitForBuffers)
   }
 
   CLog::Log(LOGINFO, "deleting video codec");
-  m_pVideoCodec.reset();
+  ReplaceCodec(nullptr);
 
   if (m_picture.videoBuffer)
   {
     m_picture.videoBuffer->Release();
     m_picture.videoBuffer = nullptr;
   }
+}
+
+void CVideoPlayerVideo::ReplaceCodec(std::unique_ptr<CDVDVideoCodec> codec)
+{
+  std::unique_ptr<CDVDVideoCodec> old;
+  {
+    std::lock_guard<std::mutex> lock(m_codecMutex);
+    old = std::move(m_pVideoCodec);
+    m_pVideoCodec = std::move(codec);
+  }
+  // outside the lock: closing a hardware decoder takes time, and HasData()
+  // and GetPlayerInfo() must not wait on it
+  old.reset();
+}
+
+bool CVideoPlayerVideo::SupportsExtention() const
+{
+  std::lock_guard<std::mutex> lock(m_codecMutex);
+  return m_pVideoCodec && m_pVideoCodec->SupportsExtention();
 }
 
 bool CVideoPlayerVideo::AcceptsData() const
@@ -320,6 +340,7 @@ bool CVideoPlayerVideo::HasData() const
 
   if (!(ret = (m_messageQueue.GetDataSize() > 0)))
   {
+    std::lock_guard<std::mutex> lock(m_codecMutex);
     if (m_pVideoCodec && m_processInfo.IsVideoHwDecoder())
       ret = m_pVideoCodec->GetDataLevel() > 0;
   }
@@ -986,8 +1007,11 @@ void CVideoPlayerVideo::Flush(bool sync)
   // Before the message, which queues behind whatever the video thread is already
   // doing - a hardware decoder can be deep into retrying a write of a packet
   // this flush will discard.
-  if (m_pVideoCodec)
-    m_pVideoCodec->Abort();
+  {
+    std::lock_guard<std::mutex> lock(m_codecMutex);
+    if (m_pVideoCodec)
+      m_pVideoCodec->Abort();
+  }
 
   SendMessage(std::make_shared<CDVDMsgBool>(CDVDMsg::GENERAL_FLUSH, sync), 1);
   m_bAbortOutput = true;
@@ -1214,8 +1238,11 @@ std::string CVideoPlayerVideo::GetPlayerInfo()
   int width, height;
   m_processInfo.GetVideoDimensions(width, height);
   s << "vq:" << std::setw(2) << std::min(99, m_messageQueue.GetLevel()) << "% (" << std::setw(2) << std::min(99, m_messageQueue.GetLevel(true));
-  if (m_pVideoCodec && m_processInfo.IsVideoHwDecoder())
-    s << "%/" << std::setw(2) << std::min(99, m_pVideoCodec->GetDataLevel());
+  {
+    std::lock_guard<std::mutex> lock(m_codecMutex);
+    if (m_pVideoCodec && m_processInfo.IsVideoHwDecoder())
+      s << "%/" << std::setw(2) << std::min(99, m_pVideoCodec->GetDataLevel());
+  }
   s << "%, " << std::setw(3) << m_messageQueue.GetMaxDataSize() / SIZE_1M << "MB)";
   s << std::fixed << std::setprecision(3) << m_messageQueue.GetTimeSize();
   s << "s, Mb/s:" << std::fixed << std::setprecision(2)
