@@ -346,10 +346,10 @@ void CRendererAML::Reset()
   {
     reset_arr[i][0] = i;
 
-    if (m_buffers[i].videoBuffer)
-      reset_arr[i][1] = dynamic_cast<CAMLVideoBuffer *>(m_buffers[i].videoBuffer)->m_bufferIndex;
-    else
-      reset_arr[i][1] = 0;
+    // a buffer that is not the decoder's (a software-decoded picture) has no
+    // index of its own; it sorts first, as an empty slot does
+    const auto* amli = dynamic_cast<CAMLVideoBuffer*>(m_buffers[i].videoBuffer);
+    reset_arr[i][1] = amli ? amli->m_bufferIndex : 0;
   }
 
   std::sort(std::begin(reset_arr), std::end(reset_arr),
