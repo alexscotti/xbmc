@@ -200,6 +200,37 @@ CBlurayIsoCache::PagePtr CBlurayIsoCache::LoadPage(int64_t pageIndex, bool prefe
   if (!IsValidPageIndex(pageIndex) || !m_readCallback)
     return nullptr;
 
+  {
+    // One load per page at a time. Without this a reader that reaches the
+    // page the worker is fetching - which is what happens when the link is
+    // slow - queues behind that read on the handle's lock and then reads the
+    // same page from the share again, doubling the I/O exactly when
+    // throughput is short.
+    std::unique_lock<std::mutex> lock(m_cacheMutex);
+    m_pageLoaded.wait(lock, [&] { return m_loading.count(pageIndex) == 0; });
+    auto it = m_pages.find(pageIndex);
+    if (it != m_pages.end())
+    {
+      TouchPageUnlocked(it);
+      return it->second.page;
+    }
+    m_loading.insert(pageIndex);
+  }
+  // Cleared on every way out, so a failed load cannot leave a waiter stuck.
+  struct LoadingMark
+  {
+    CBlurayIsoCache& cache;
+    int64_t pageIndex;
+    ~LoadingMark()
+    {
+      {
+        std::lock_guard<std::mutex> lock(cache.m_cacheMutex);
+        cache.m_loading.erase(pageIndex);
+      }
+      cache.m_pageLoaded.notify_all();
+    }
+  } mark{*this, pageIndex};
+
   auto page = std::make_shared<Page>();
   page->data.resize(m_config.pageSize);
 

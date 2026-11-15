@@ -104,6 +104,9 @@ private:
   std::mutex m_cacheMutex;
   std::list<int64_t> m_lruOrder;
   std::unordered_map<int64_t, CacheSlot> m_pages;
+  // Pages a LoadPage is reading right now, and the signal that one finished.
+  std::unordered_set<int64_t> m_loading;
+  std::condition_variable m_pageLoaded;
 
   std::mutex m_queueMutex;
   std::condition_variable m_queueChanged;
