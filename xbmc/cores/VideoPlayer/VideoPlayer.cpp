@@ -2585,6 +2585,12 @@ void CVideoPlayer::Process()
       // the disc's graphics until it starts one (see Prepare)
       if (const int waitState = DiscWaitState(true))
       {
+        // Nothing is presented on this screen, so a timeline event stamped on
+        // the segment before it would wait for a clock position that never
+        // comes - the presented menu state, title info and the BD-J
+        // notifications held for presentation stayed at the old segment's for
+        // as long as the screen was up. Apply them now, as a flush does.
+        ApplyDiscTimelineEvents(true);
         UpdatePlayState(200);
         CheckMenuOnlyStart(waitState == 1);
         CThread::Sleep(20ms);
