@@ -872,6 +872,13 @@ protected:
     // Read-ahead on a network share: the clips of a Blu-ray FOLDER (files
     // mode), or a disc image read whole (stream mode, `image` set).
     std::unique_ptr<SBlurayFileSession> m_fileSession;
+    // Abort() runs on the thread closing the file, not the player's: it
+    // guards m_fileSession's replacement against Abort()'s use of it, and the
+    // flag is what the player thread's read path checks, since m_hold is
+    // rewritten by that path and can lose an HOLD_EXIT set from outside.
+    std::mutex m_sessionMutex;
+    std::atomic<bool> m_abortRequested{false};
+    void SetFileSession(std::unique_ptr<SBlurayFileSession> session);
 
 #if defined(HAS_UDFREAD)
     // Keeps a disc image's UDF volume mounted for as long as the disc is open

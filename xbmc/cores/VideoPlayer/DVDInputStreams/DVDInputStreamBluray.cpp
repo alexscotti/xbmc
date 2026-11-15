@@ -150,6 +150,10 @@ BD_FILE_H* session_file_open(void* handle, const char* rel_path)
       file->internal = new std::shared_ptr<CBlurayStreamCache::CView>(std::move(view));
       return file;
     }
+    // Stopping: an open of our own now would be the network call the abort
+    // just returned every reader from.
+    if (session->cache->IsAborted())
+      return nullptr;
     // Could not be cached - fall through and open it directly, which is what
     // happens with the read-ahead switched off.
     CLog::Log(LOGDEBUG, "CDVDInputStreamBluray - {} not cached, opening it directly", rel_path);
@@ -276,8 +280,25 @@ bool CDVDInputStreamBluray::GetCacheStatus(XFILE::SCacheStatus* status)
   return true;
 }
 
+void CDVDInputStreamBluray::SetFileSession(std::unique_ptr<SBlurayFileSession> session)
+{
+  std::unique_ptr<SBlurayFileSession> old;
+  {
+    std::lock_guard<std::mutex> lock(m_sessionMutex);
+    old = std::move(m_fileSession);
+    m_fileSession = std::move(session);
+    // An Abort() that came before the cache was published has nobody else to
+    // return the reads that will now wait on it
+    if (m_abortRequested && m_fileSession && m_fileSession->cache)
+      m_fileSession->cache->Abort();
+  }
+  // outside the lock: the destructor logs and may abandon a worker
+  old.reset();
+}
+
 void CDVDInputStreamBluray::Abort()
 {
+  m_abortRequested = true;
   m_hold = HOLD_EXIT;
 
   // Directly, not via m_hold: that flag is only read at the top of the nav
@@ -285,6 +306,7 @@ void CDVDInputStreamBluray::Abort()
   // a bare bd_read that never looks at it. Every reader waiting on a page
   // returns now, so CloseFile's wait for the player thread does not become a
   // wait for the network.
+  std::lock_guard<std::mutex> lock(m_sessionMutex);
   if (m_fileSession && m_fileSession->cache)
     m_fileSession->cache->Abort();
 }
@@ -763,9 +785,10 @@ bool CDVDInputStreamBluray::Open()
     // Read-ahead for the clips of this folder. A nullptr cache is not an
     // error: the setting is off, the folder is local, or another session holds
     // the arena, and then every clip is opened directly as before.
-    m_fileSession = std::make_unique<SBlurayFileSession>();
-    m_fileSession->rootPath = root;
-    m_fileSession->cache = STREAMCACHE::ClaimFor(root);
+    auto session = std::make_unique<SBlurayFileSession>();
+    session->rootPath = root;
+    session->cache = STREAMCACHE::ClaimFor(root);
+    SetFileSession(std::move(session));
 
 #if defined(HAS_UDFREAD)
     // Only in files mode does libbluray reach the disc through Kodi's filesystem, opening a dozen
@@ -1024,7 +1047,7 @@ void CDVDInputStreamBluray::Close()
   // After bd_close(): until then libbluray can still read through a view onto
   // it. Its destructor logs the session's stats and abandons rather than joins
   // a worker stuck in a read.
-  m_fileSession.reset();
+  SetFileSession(nullptr);
   m_rootPath.clear();
 
 #if defined(HAS_UDFREAD)
@@ -1934,7 +1957,8 @@ int CDVDInputStreamBluray::Read(uint8_t* buf, int buf_size)
          return 0;
 
       if(  m_hold == HOLD_ERROR
-        || m_hold == HOLD_EXIT)
+        || m_hold == HOLD_EXIT
+        || m_abortRequested)
         return -1;
 
       result = TakeHeldItemBytes(buf, buf_size);
@@ -3181,7 +3205,7 @@ bool CDVDInputStreamBluray::GetDiscVideoFrameRate(int pid,
 
 CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
 {
-  if(!m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR)
+  if(!m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR || m_abortRequested)
     return NEXTSTREAM_NONE;
 
   ReleaseExpiredStill();
@@ -3213,6 +3237,9 @@ CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
   while(bd_get_event(m_bd, &m_event))
     ProcessEvent();
 
+  if (m_abortRequested)
+    return NEXTSTREAM_NONE;
+
   if(m_hold == HOLD_STILL)
     return NEXTSTREAM_RETRY;
 
@@ -3223,7 +3250,8 @@ CDVDInputStream::ENextStream CDVDInputStreamBluray::NextStream()
 int CDVDInputStreamBluray::GetBdjWaitState(bool drain)
 {
 #if defined(BD_HAVE_BDJ_WAITING_FOR_PLAYBACK)
-  if (m_bd == nullptr || !m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR)
+  if (m_bd == nullptr || !m_navmode || m_hold == HOLD_EXIT || m_hold == HOLD_ERROR ||
+      m_abortRequested)
     return 0;
 
   // BD-J starts playlists (and changes titles) on its own threads; the events
@@ -3991,7 +4019,7 @@ bool CDVDInputStreamBluray::OpenStream(CFileItem &item)
 {
   StopIsoCache();
   m_isoCacheFallbacks = 0;
-  m_fileSession.reset();
+  SetFileSession(nullptr);
 
   // An image on a network share is read through the stream cache, like a
   // folder's clips: the player's reads wait on the cache rather than on the
@@ -4005,10 +4033,11 @@ bool CDVDInputStreamBluray::OpenStream(CFileItem &item)
   {
     if (auto view = cache->OpenFile(imagePath))
     {
-      m_fileSession = std::make_unique<SBlurayFileSession>();
-      m_fileSession->rootPath = imagePath;
-      m_fileSession->cache = std::move(cache);
-      m_fileSession->image = std::move(view);
+      auto session = std::make_unique<SBlurayFileSession>();
+      session->rootPath = imagePath;
+      session->cache = std::move(cache);
+      session->image = std::move(view);
+      SetFileSession(std::move(session));
       CLog::Log(LOGINFO, "CDVDInputStreamBluray::OpenStream - {} read through the stream cache",
                 CURL::GetRedacted(imagePath));
       return true;

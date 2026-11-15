@@ -11,6 +11,10 @@
 #include "BlurayStreamCache.h"
 #include "DVDInputStream.h"
 
+#include <atomic>
+#include <memory>
+#include <mutex>
+
 class CDVDInputStreamFile : public CDVDInputStream
 {
 public:
@@ -40,7 +44,13 @@ protected:
   // the share is away does not have to wait for a cache thread stuck in a
   // read, which is what CFileCache's Close does today - nor for a close of a
   // handle of ours, which on smb:// waits on the same lock that read holds.
+  // Written by the player thread, read by Abort() on the closing thread and
+  // GetReadAheadInfo() on the render thread: replaced and read under the lock.
   std::shared_ptr<CBlurayStreamCache> m_streamCache;
+  mutable std::mutex m_streamCacheMutex;
+  std::atomic<bool> m_abortRequested{false};
+  void SetStreamCache(std::shared_ptr<CBlurayStreamCache> cache);
+  std::shared_ptr<CBlurayStreamCache> StreamCache() const;
   std::shared_ptr<CBlurayStreamCache::CView> m_streamView;
   // What m_pFile answered before it was closed.
   int64_t m_seekPossible = 0;

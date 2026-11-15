@@ -32,10 +32,30 @@ CDVDInputStreamFile::~CDVDInputStreamFile()
   Close();
 }
 
+void CDVDInputStreamFile::SetStreamCache(std::shared_ptr<CBlurayStreamCache> cache)
+{
+  std::shared_ptr<CBlurayStreamCache> old;
+  {
+    std::lock_guard<std::mutex> lock(m_streamCacheMutex);
+    old = std::move(m_streamCache);
+    m_streamCache = std::move(cache);
+    // An Abort() before the cache was claimed has nobody else to return the
+    // reads that would wait on it
+    if (m_abortRequested && m_streamCache)
+      m_streamCache->Abort();
+  }
+}
+
+std::shared_ptr<CBlurayStreamCache> CDVDInputStreamFile::StreamCache() const
+{
+  std::lock_guard<std::mutex> lock(m_streamCacheMutex);
+  return m_streamCache;
+}
+
 std::string CDVDInputStreamFile::GetReadAheadInfo()
 {
-  if (m_streamCache)
-    return m_streamCache->GetOverlayLine();
+  if (auto cache = StreamCache())
+    return cache->GetOverlayLine();
   return {};
 }
 
@@ -44,8 +64,9 @@ void CDVDInputStreamFile::Abort()
   // Called when the player is tearing down. Every reader waiting on a page
   // returns at once, so a Stop while the share is away does not wait out the
   // network - the thing CFileCache's Close cannot do.
-  if (m_streamCache)
-    m_streamCache->Abort();
+  m_abortRequested = true;
+  if (auto cache = StreamCache())
+    cache->Abort();
 }
 
 bool CDVDInputStreamFile::IsEOF()
@@ -89,7 +110,7 @@ bool CDVDInputStreamFile::Open()
   if (!(m_flags & READ_NO_CACHE) && STREAMCACHE::IsCacheableSingleFile(path) &&
       STREAMCACHE::IsRemotePath(path))
   {
-    m_streamCache = STREAMCACHE::ClaimFor(path);
+    SetStreamCache(STREAMCACHE::ClaimFor(path));
     if (m_streamCache)
     {
       // One buffer, never two: the file itself is opened uncached and the
@@ -116,7 +137,7 @@ bool CDVDInputStreamFile::Open()
       // through it directly rather than fail the playback.
       CLog::Log(LOGINFO, "CDVDInputStreamFile - read-ahead declined for {}, reading directly",
                 CURL::GetRedacted(path));
-      m_streamCache.reset();
+      SetStreamCache(nullptr);
     }
   }
 
@@ -146,7 +167,7 @@ void CDVDInputStreamFile::Close()
 {
   // Before m_pFile: the view reads through the cache, not through it.
   m_streamView.reset();
-  m_streamCache.reset();
+  SetStreamCache(nullptr);
 
   if (m_pFile)
   {
