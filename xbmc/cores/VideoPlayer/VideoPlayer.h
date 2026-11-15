@@ -507,6 +507,7 @@ protected:
   void FlushBuffers(double pts, bool accurate, bool sync);
 
   void HandleMessages();
+  void HandlePlayerSetSpeed(const std::shared_ptr<CDVDMsgPlayerSetSpeed>& msg);
   void HandlePlaySpeed();
   bool IsInMenuInternal() const;
   void SynchronizeDemuxer();

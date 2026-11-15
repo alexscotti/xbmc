@@ -1982,48 +1982,87 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
   // backwards by ~35 h a second); CloseStream below then
   // finds the queue empty, or takes over with its own rules if this gives up
   // (no progress for 1.5 s, or the 30 s ceiling).
+  // Both waits below read the player's messages (the audio one must, for its
+  // restart handshake). A pause or a resume is applied at once: holding it with
+  // the rest, as the audio wait did, ignored a pause in a title's last seconds
+  // and then its resume too, and since a paused clock counts as progress both
+  // waits ran to their ceilings - up to 60 s with play ignored - and the paused
+  // stream players then flushed the tail instead of playing it out. Time spent
+  // paused does not count against the ceilings. Every other message is held and
+  // put back, in order, after the waits.
+  std::vector<std::pair<std::shared_ptr<CDVDMsg>, int>> held;
+  const auto serviceDrainMessages = [this, &held](bool answerAudioRestart)
+  {
+    std::shared_ptr<CDVDMsg> msg;
+    int priority = 0;
+    if (m_messenger.Get(msg, 100ms, priority) != MSGQ_OK)
+      return;
+    if (answerAudioRestart && msg->IsType(CDVDMsg::PLAYER_STARTED) &&
+        std::static_pointer_cast<CDVDMsgType<SStartMsg>>(msg)->m_value.player ==
+            VideoPlayer_AUDIO)
+    {
+      CLog::Log(LOGINFO,
+                "VideoPlayer: segment drain - audio restarted in its queue, resyncing it "
+                "at clock {:.3f}",
+                m_clock.GetClock() / DVD_TIME_BASE);
+      m_CurrentAudio.syncState = IDVDStreamPlayer::SYNC_INSYNC;
+      m_CurrentAudio.avsync = CCurrentStream::AV_SYNC_NONE;
+      m_VideoPlayerAudio->SendMessage(
+          std::make_shared<CDVDMsgDouble>(CDVDMsg::GENERAL_RESYNC, m_clock.GetClock()), 1);
+      return;
+    }
+    if (msg->IsType(CDVDMsg::PLAYER_SETSPEED))
+    {
+      const auto speedMsg = std::static_pointer_cast<CDVDMsgPlayerSetSpeed>(msg);
+      const auto plain = [](int speed)
+      { return speed == DVD_PLAYSPEED_PAUSE || speed == DVD_PLAYSPEED_NORMAL; };
+      if (!speedMsg->IsTempo() && plain(speedMsg->GetSpeed()) && plain(m_playSpeed))
+      {
+        CLog::Log(LOGINFO, "VideoPlayer: segment drain - {}",
+                  speedMsg->GetSpeed() == DVD_PLAYSPEED_PAUSE ? "paused" : "resumed");
+        HandlePlayerSetSpeed(speedMsg);
+        return;
+      }
+    }
+    held.emplace_back(std::move(msg), priority);
+  };
+
+  // CloseStream(audio) blocks this thread until the audio queue has played
+  // out, and the play state (Player.Time, the OSD clock) is only refreshed
+  // from here: it stood still for the whole drain - the last ~15 s of every
+  // title that ends in one (Terminator 2, Memento, Dude, Where's My Car?).
+  // Wait for the playout here instead, advancing it (AdvancePlayTime - the
+  // demuxer is already closed, so the full UpdatePlayState would recompute
+  // the offset from a torn-down state: Terminator 2 read -8 h, then ran
+  // backwards by ~35 h a second); CloseStream below then
+  // finds the queue empty, or takes over with its own rules if this gives up
+  // (no progress for 1.5 s, or 30 s of playing time).
+  //
+  // The segment's queued audio can itself cross an in-queue codec change (a
+  // tail clip joined with DRAIN_KEEP_VIDEO). The reopened audio player then
+  // fills its cache, posts PLAYER_STARTED and waits for the resync only this
+  // thread sends - Nosferatu (1922)'s 10.7 s LPCM tail stalled there, this
+  // wait gave up and CloseStream discarded 10.4 s of it unplayed, with
+  // Player.Time standing still. Answer that handshake as the start sync does
+  // with video in sync.
   if (drain && m_CurrentAudio.id >= 0)
   {
-    const auto ceiling = std::chrono::steady_clock::now() + 30s;
-    auto lastProgress = std::chrono::steady_clock::now();
+    auto budget = std::chrono::steady_clock::duration(30s);
+    auto last = std::chrono::steady_clock::now();
+    auto lastProgress = last;
     int lastLevel = m_VideoPlayerAudio->GetLevel();
     double lastPts = m_VideoPlayerAudio->GetCurrentPts();
-    // The segment's queued audio can itself cross an in-queue codec change (a
-    // tail clip joined with DRAIN_KEEP_VIDEO). The reopened audio player then
-    // fills its cache, posts PLAYER_STARTED and waits for the resync only this
-    // thread sends - Nosferatu (1922)'s 10.7 s LPCM tail stalled there, this
-    // wait gave up and CloseStream discarded 10.4 s of it unplayed, with
-    // Player.Time standing still. Answer that handshake as the start sync does
-    // with video in sync; hold every other message and put them back, in
-    // order, after the wait.
-    std::vector<std::pair<std::shared_ptr<CDVDMsg>, int>> held;
     while (!m_bAbortRequest && m_VideoPlayerAudio->HasData() &&
-           std::chrono::steady_clock::now() < ceiling)
+           budget > std::chrono::steady_clock::duration::zero())
     {
-      std::shared_ptr<CDVDMsg> msg;
-      int priority = 0;
-      if (m_messenger.Get(msg, 100ms, priority) == MSGQ_OK)
-      {
-        if (msg->IsType(CDVDMsg::PLAYER_STARTED) &&
-            std::static_pointer_cast<CDVDMsgType<SStartMsg>>(msg)->m_value.player ==
-                VideoPlayer_AUDIO)
-        {
-          CLog::Log(LOGINFO,
-                    "VideoPlayer: segment drain - audio restarted in its queue, resyncing it "
-                    "at clock {:.3f}",
-                    m_clock.GetClock() / DVD_TIME_BASE);
-          m_CurrentAudio.syncState = IDVDStreamPlayer::SYNC_INSYNC;
-          m_CurrentAudio.avsync = CCurrentStream::AV_SYNC_NONE;
-          m_VideoPlayerAudio->SendMessage(
-              std::make_shared<CDVDMsgDouble>(CDVDMsg::GENERAL_RESYNC, m_clock.GetClock()), 1);
-        }
-        else
-          held.emplace_back(std::move(msg), priority);
-      }
+      serviceDrainMessages(true);
       AdvancePlayTime();
       const int level = m_VideoPlayerAudio->GetLevel();
       const double pts = m_VideoPlayerAudio->GetCurrentPts();
       const auto now = std::chrono::steady_clock::now();
+      if (m_playSpeed != DVD_PLAYSPEED_PAUSE)
+        budget -= now - last;
+      last = now;
       if (level != lastLevel || pts != lastPts || m_clock.IsPaused())
       {
         lastProgress = now;
@@ -2033,10 +2072,6 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
       else if (now - lastProgress > 1500ms)
         break;
     }
-    // Get takes from the back and PutBack puts there: reversed, the held
-    // messages come out again in the order they arrived
-    for (auto it = held.rbegin(); it != held.rend(); ++it)
-      m_messenger.PutBack(it->first, it->second);
   }
   // The picture can outlast the sound by far: Dune's main audio track ends
   // 15 s before its film's video does, and CloseStream(video) below blocked
@@ -2047,18 +2082,22 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
   // progress check and the ceiling besides.
   if (drain && m_CurrentVideo.id >= 0)
   {
-    const auto ceiling = std::chrono::steady_clock::now() + 30s;
-    auto lastProgress = std::chrono::steady_clock::now();
+    auto budget = std::chrono::steady_clock::duration(30s);
+    auto last = std::chrono::steady_clock::now();
+    auto lastProgress = last;
     int lastLevel = m_VideoPlayerVideo->GetDataLevel();
     double lastPts = m_VideoPlayerVideo->GetCurrentPts();
     while (!m_bAbortRequest && m_VideoPlayerVideo->HasData() &&
-           std::chrono::steady_clock::now() < ceiling)
+           budget > std::chrono::steady_clock::duration::zero())
     {
-      CThread::Sleep(100ms);
+      serviceDrainMessages(false);
       AdvancePlayTime();
       const int level = m_VideoPlayerVideo->GetDataLevel();
       const double pts = m_VideoPlayerVideo->GetCurrentPts();
       const auto now = std::chrono::steady_clock::now();
+      if (m_playSpeed != DVD_PLAYSPEED_PAUSE)
+        budget -= now - last;
+      last = now;
       if (level != lastLevel || pts != lastPts || m_clock.IsPaused())
       {
         lastProgress = now;
@@ -2069,6 +2108,10 @@ void CVideoPlayer::BdSegmentTransition(bool glided)
         break;
     }
   }
+  // Get takes from the back and PutBack puts there: reversed, the held
+  // messages come out again in the order they arrived
+  for (auto it = held.rbegin(); it != held.rend(); ++it)
+    m_messenger.PutBack(it->first, it->second);
   CloseStream(m_CurrentAudio, drain);
   CloseStream(m_CurrentVideo, drain);
 
@@ -4981,78 +5024,7 @@ void CVideoPlayer::HandleMessages()
     }
     else if (pMsg->IsType(CDVDMsg::PLAYER_SETSPEED))
     {
-      const auto msg = std::static_pointer_cast<CDVDMsgPlayerSetSpeed>(pMsg);
-      const int speed = msg->GetSpeed();
-
-      // correct our current clock, as it would start going wrong otherwise
-      if (m_State.timestamp > 0)
-      {
-        double offset;
-        offset = m_clock.GetAbsoluteClock() - m_State.timestamp;
-        offset *= m_playSpeed / DVD_PLAYSPEED_NORMAL;
-        offset = DVD_TIME_TO_MSEC(offset);
-        if (offset > 1000)
-          offset = 1000;
-        if (offset < -1000)
-          offset = -1000;
-        m_State.time += offset;
-        m_State.timestamp = m_clock.GetAbsoluteClock();
-      }
-
-      if (speed != DVD_PLAYSPEED_PAUSE && m_playSpeed != DVD_PLAYSPEED_PAUSE && speed != m_playSpeed)
-      {
-        m_callback.OnPlayBackSpeedChanged(speed / DVD_PLAYSPEED_NORMAL);
-        m_processInfo->SeekFinished(0);
-      }
-
-      if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_PVRMANAGER) && speed != m_playSpeed)
-      {
-        std::shared_ptr<CInputStreamPVRBase> pvrinputstream = std::static_pointer_cast<CInputStreamPVRBase>(m_pInputStream);
-        pvrinputstream->Pause(speed == 0);
-      }
-
-      const bool isTempoSpeed = msg->IsTempo();
-      assert(!(isTempoSpeed &&
-               !m_processInfo->IsTempoAllowed(static_cast<float>(speed) / DVD_PLAYSPEED_NORMAL)));
-
-      const bool wasFFRW =
-          (m_playSpeed != DVD_PLAYSPEED_NORMAL && m_playSpeed != DVD_PLAYSPEED_PAUSE &&
-           !m_processInfo->IsTempoAllowed(static_cast<float>(m_playSpeed) / DVD_PLAYSPEED_NORMAL));
-
-      // Seek when returning to normal 1.0x or tempo play from FF/RW
-      // back from RW: clock is not in sync with current pts
-      // back from FF: fill the empty audio queue to avoid no audio
-      if ((speed == DVD_PLAYSPEED_NORMAL || isTempoSpeed) && wasFFRW)
-      {
-        double iTime = m_VideoPlayerVideo->GetCurrentPts();
-        if (iTime == DVD_NOPTS_VALUE)
-          iTime = m_clock.GetClock();
-        iTime = (iTime + m_State.time_offset) / 1000;
-
-        CDVDMsgPlayerSeek::CMode mode;
-        mode.time = iTime;
-        mode.backward = m_playSpeed < 0;
-        mode.accurate = true;
-        mode.trickplay = true;
-        mode.sync = true;
-        mode.restore = false;
-        m_messenger.Put(std::make_shared<CDVDMsgPlayerSeek>(mode));
-      }
-
-      if (isTempoSpeed)
-        m_processInfo->SetTempo(static_cast<float>(speed) / DVD_PLAYSPEED_NORMAL);
-      else
-        m_processInfo->SetSpeed(static_cast<float>(speed) / DVD_PLAYSPEED_NORMAL);
-
-      m_processInfo->SetFrameAdvance(false);
-
-      m_playSpeed = speed;
-
-      m_caching = CACHESTATE_DONE;
-      m_clock.SetSpeed(speed);
-      m_VideoPlayerAudio->SetSpeed(speed);
-      m_VideoPlayerVideo->SetSpeed(speed);
-      m_streamPlayerSpeed = speed;
+      HandlePlayerSetSpeed(std::static_pointer_cast<CDVDMsgPlayerSetSpeed>(pMsg));
     }
     else if (pMsg->IsType(CDVDMsg::PLAYER_FRAME_ADVANCE))
     {
@@ -5132,6 +5104,81 @@ void CVideoPlayer::HandleMessages()
     else if (pMsg->IsType(CDVDMsg::PLAYER_SET_UPDATE_STREAM_DETAILS))
       m_updateStreamDetails = true;
   }
+}
+
+void CVideoPlayer::HandlePlayerSetSpeed(const std::shared_ptr<CDVDMsgPlayerSetSpeed>& msg)
+{
+  const int speed = msg->GetSpeed();
+
+  // correct our current clock, as it would start going wrong otherwise
+  if (m_State.timestamp > 0)
+  {
+    double offset;
+    offset = m_clock.GetAbsoluteClock() - m_State.timestamp;
+    offset *= m_playSpeed / DVD_PLAYSPEED_NORMAL;
+    offset = DVD_TIME_TO_MSEC(offset);
+    if (offset > 1000)
+      offset = 1000;
+    if (offset < -1000)
+      offset = -1000;
+    m_State.time += offset;
+    m_State.timestamp = m_clock.GetAbsoluteClock();
+  }
+
+  if (speed != DVD_PLAYSPEED_PAUSE && m_playSpeed != DVD_PLAYSPEED_PAUSE && speed != m_playSpeed)
+  {
+    m_callback.OnPlayBackSpeedChanged(speed / DVD_PLAYSPEED_NORMAL);
+    m_processInfo->SeekFinished(0);
+  }
+
+  if (m_pInputStream->IsStreamType(DVDSTREAM_TYPE_PVRMANAGER) && speed != m_playSpeed)
+  {
+    std::shared_ptr<CInputStreamPVRBase> pvrinputstream = std::static_pointer_cast<CInputStreamPVRBase>(m_pInputStream);
+    pvrinputstream->Pause(speed == 0);
+  }
+
+  const bool isTempoSpeed = msg->IsTempo();
+  assert(!(isTempoSpeed &&
+           !m_processInfo->IsTempoAllowed(static_cast<float>(speed) / DVD_PLAYSPEED_NORMAL)));
+
+  const bool wasFFRW =
+      (m_playSpeed != DVD_PLAYSPEED_NORMAL && m_playSpeed != DVD_PLAYSPEED_PAUSE &&
+       !m_processInfo->IsTempoAllowed(static_cast<float>(m_playSpeed) / DVD_PLAYSPEED_NORMAL));
+
+  // Seek when returning to normal 1.0x or tempo play from FF/RW
+  // back from RW: clock is not in sync with current pts
+  // back from FF: fill the empty audio queue to avoid no audio
+  if ((speed == DVD_PLAYSPEED_NORMAL || isTempoSpeed) && wasFFRW)
+  {
+    double iTime = m_VideoPlayerVideo->GetCurrentPts();
+    if (iTime == DVD_NOPTS_VALUE)
+      iTime = m_clock.GetClock();
+    iTime = (iTime + m_State.time_offset) / 1000;
+
+    CDVDMsgPlayerSeek::CMode mode;
+    mode.time = iTime;
+    mode.backward = m_playSpeed < 0;
+    mode.accurate = true;
+    mode.trickplay = true;
+    mode.sync = true;
+    mode.restore = false;
+    m_messenger.Put(std::make_shared<CDVDMsgPlayerSeek>(mode));
+  }
+
+  if (isTempoSpeed)
+    m_processInfo->SetTempo(static_cast<float>(speed) / DVD_PLAYSPEED_NORMAL);
+  else
+    m_processInfo->SetSpeed(static_cast<float>(speed) / DVD_PLAYSPEED_NORMAL);
+
+  m_processInfo->SetFrameAdvance(false);
+
+  m_playSpeed = speed;
+
+  m_caching = CACHESTATE_DONE;
+  m_clock.SetSpeed(speed);
+  m_VideoPlayerAudio->SetSpeed(speed);
+  m_VideoPlayerVideo->SetSpeed(speed);
+  m_streamPlayerSpeed = speed;
 }
 
 void CVideoPlayer::SetCaching(ECacheState state)
