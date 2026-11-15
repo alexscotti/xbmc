@@ -4180,7 +4180,10 @@ void CDVDInputStreamBluray::SaveCurrentState(const CStreamDetails& details)
   SavePlaylistDetails(m_playedPlaylists, m_startWatchTime,
                       {.playlist = static_cast<int>(m_titleInfo->playlist),
                        .inMenu = m_isInMainMenu,
-                       .duration = std::chrono::milliseconds(GetTotalTime()),
+                       // the same playlist's: GetTotalTime() is the PRESENTED
+                       // snapshot, which lags m_titleInfo across a transition -
+                       // and this runs as the new playlist's demuxer opens
+                       .duration = std::chrono::milliseconds(m_titleInfo->duration / 90),
                        .details = details});
 
   // Reset watch timer for next playlist
