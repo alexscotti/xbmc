@@ -862,3 +862,49 @@ TEST_F(BlurayStreamCacheTest, CloseDoesNotWaitForAWorkerClosingItsSources)
   EXPECT_LT(ms, 250) << "close waited for the worker's close of its source";
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
 }
+
+// Measured on the AM9 with a BD-J disc image: libbluray reads two regions of
+// the one file in alternation - the menu's background clip and BD-J's
+// resources - and the cache, treating every alternation as a jump, kept
+// dropping both windows: contiguous cover 0, an 8 s outage stalled the film.
+// Each region read sequentially must keep its own read-ahead.
+TEST_F(BlurayStreamCacheTest, TwoRegionsReadInAlternationBothReadAhead)
+{
+  FakeFile* image = AddFile("disc.iso", 31, 800);
+  auto cache = CBlurayStreamCache::Claim(Config(64), Factory());
+  ASSERT_NE(cache, nullptr);
+  auto view = cache->OpenFile("disc.iso");
+  image->delayMs.store(2);
+
+  std::vector<uint8_t> buffer(16 * 1024);
+  int64_t a = 100 * static_cast<int64_t>(PAGE);
+  int64_t b = 500 * static_cast<int64_t>(PAGE);
+  const auto readAt = [&](int64_t& at) {
+    view->Seek(at, SEEK_SET);
+    const int64_t n = view->Read(buffer.data(), buffer.size());
+    ASSERT_GT(n, 0);
+    ASSERT_TRUE(Matches(buffer, static_cast<size_t>(n), image->id, at));
+    at += n;
+  };
+  for (int i = 0; i < 400; ++i) // ~100 pages of each, interleaved 1:1
+  {
+    readAt(a);
+    readAt(b);
+    // Half a page per pass against a page per 2 ms: below the link's rate,
+    // so a wait is the cache's doing, not the link's.
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  }
+  const auto before = cache->GetStats();
+  for (int i = 0; i < 200; ++i)
+  {
+    readAt(a);
+    readAt(b);
+    // Half a page per pass against a page per 2 ms: below the link's rate,
+    // so a wait is the cache's doing, not the link's.
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  }
+  const auto after = cache->GetStats();
+  // Once both runs are established, essentially nothing waits.
+  EXPECT_LE(after.readsWaited - before.readsWaited, 4u)
+      << "interleaved sequential runs in one file did not both read ahead";
+}

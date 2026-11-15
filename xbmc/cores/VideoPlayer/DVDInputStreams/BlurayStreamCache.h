@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -324,11 +325,23 @@ private:
     // mark and reads that page directly, so a fault costs throughput for one
     // read rather than leaving a permanent hole in the file.
     std::unordered_set<int64_t> failedPages;
-    // Where the sequential run this file is in reached, and how far ahead has
-    // already been queued, so a steady reader queues one page per page
-    // consumed instead of re-walking the window.
+    // Where the last read of this file ended. Only for classifying reads
+    // (sequential, after a seek) in the stats; read-ahead follows `runs`.
     int64_t lastReadEndPage{-1};
-    int64_t prefetchHorizon{-1};
+    // The sequential runs being read in this file, each with its own window.
+    // One file can be read in several places at once: a disc image read whole
+    // is the clip being played AND, interleaved with it, whatever else
+    // libbluray reads (BD-J resources, a menu's background clip). With one
+    // anchor per file every alternation looked like a jump and both windows
+    // were dropped - measured on a BD-J image: contiguous cover 0.
+    struct Run
+    {
+      uint64_t id{0};          // 0 = unused
+      int64_t lastEnd{-1};     // page the run's last read ended in
+      int64_t horizon{-1};     // last page queued for it
+      int64_t usedMs{0};       // when it was last read
+    };
+    std::array<Run, 4> runs;
     // Has a reader ever read from this file? A primed clip that has not been
     // adopted yet has not; a clip that was played and closed has. That one
     // bit separates the two for eviction without any extra bookkeeping.
@@ -339,6 +352,8 @@ private:
   {
     std::shared_ptr<FileState> file;
     int64_t pageIndex{0};
+    uint64_t runId{0};   // the run it was queued for; 0 for a reader's own page
+    bool urgent{false};  // a reader is waiting for it
   };
 
   CBlurayStreamCache(const Config& config, SourceFactory factory);
@@ -381,10 +396,16 @@ private:
   void QueueForwardWindow(const std::shared_ptr<FileState>& file, int64_t lastPage);
   // `urgent` is the page a reader is waiting for: it goes to the head of the
   // queue (and moves there if it is already queued), ahead of read-ahead.
-  void QueuePage(const std::shared_ptr<FileState>& file, int64_t pageIndex, bool urgent = false);
-  // After a jump: drops queued window work for `file` that is no longer in
-  // the window ahead of `lastPage`.
-  void DropStaleWindow(const FileState* file, int64_t lastPage);
+  // `runId` is the run a read-ahead page is queued for.
+  void QueuePage(const std::shared_ptr<FileState>& file,
+                 int64_t pageIndex,
+                 bool urgent = false,
+                 uint64_t runId = 0);
+  // Drops the queued read-ahead of runs that are gone.
+  void DropRunWork(const std::vector<uint64_t>& runIds);
+  // The next window item: a page a reader waits for, else the nearest page of
+  // the most recently read run. Under m_queueMutex, m_window not empty.
+  Work PopWindowLocked();
   // Queues the head of the next clip once the reader is within nextLeadBytes
   // of this file's end. Cheap to call on every read: it does nothing until
   // the threshold, and nothing again once that clip is queued.
@@ -446,6 +467,12 @@ private:
   std::mutex m_queueMutex;
   std::condition_variable m_queueChanged;
   std::deque<Work> m_window;
+  // When each run with queued work was last read, by run id. The worker
+  // serves the most recently read run first: after a resume or a chapter
+  // skip that is the new position, and the window the reader left waits
+  // behind it until it is dropped as idle.
+  std::unordered_map<uint64_t, int64_t> m_runUsedMs;
+  uint64_t m_nextRunId{1}; // under m_cacheMutex
   // Second class of work, always served after the window above.
   // A queued prime: which clip, and where in it to start. The start is 0 for
   // the usual next-clip prime and the playitem's first packet for a same-clip

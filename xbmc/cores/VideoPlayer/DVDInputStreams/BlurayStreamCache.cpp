@@ -170,6 +170,7 @@ CBlurayStreamCache::~CBlurayStreamCache()
     std::lock_guard<std::mutex> lock(m_queueMutex);
     m_stopWorker = true;
     m_window.clear();
+    m_runUsedMs.clear();
     m_primes.clear();
     m_queued.clear();
     ctx = m_workerCtx;
@@ -242,6 +243,7 @@ void CBlurayStreamCache::Abort()
   {
     std::lock_guard<std::mutex> lock(m_queueMutex);
     m_window.clear();
+    m_runUsedMs.clear();
     m_primes.clear();
     m_queued.clear();
     if (m_workerCtx)
@@ -310,6 +312,10 @@ std::shared_ptr<CBlurayStreamCache::CView> CBlurayStreamCache::OpenFile(const st
       armed = GetFileUnlocked(path);
       if (armed->lastReadEndPage < 0)
         armed->lastReadEndPage = 0;
+      // A run at the head, so the read-ahead below is armed rather than
+      // establishing the anchor.
+      if (armed->runs[0].id == 0)
+        armed->runs[0] = FileState::Run{m_nextRunId++, 0, -1, NowMs()};
     }
     QueueForwardWindow(armed, 0);
   }
@@ -877,73 +883,159 @@ CBlurayStreamCache::PageClass CBlurayStreamCache::ClassifyUnlocked(const FileSta
 
   const int64_t headPage =
       m_headOffset.load(std::memory_order_acquire) / static_cast<int64_t>(m_config.pageSize);
-  return pageIndex < headPage ? PageClass::Behind : PageClass::Window;
+  if (pageIndex >= headPage)
+    return PageClass::Window;
+  // Behind the head - unless it is in the window of another run of this
+  // file: one file read in two places (a disc image) has the head in one of
+  // them at a time, and the other's window is not behind anything.
+  for (const auto& r : file->runs)
+    if (r.id != 0 && pageIndex >= r.lastEnd && pageIndex <= r.horizon)
+      return PageClass::Window;
+  return PageClass::Behind;
 }
+
+namespace
+{
+// A run nobody has read for this long has its queued read-ahead dropped: the
+// reader has left it (a resume, a chapter skip), so fetching it is waste.
+// Interleaved runs are read many times a second each, so they never get here.
+constexpr int64_t RUN_IDLE_MS = 2000;
+} // namespace
 
 void CBlurayStreamCache::QueueForwardWindow(const std::shared_ptr<FileState>& file, int64_t lastPage)
 {
   const int64_t maxPage = (file->length - 1) / static_cast<int64_t>(m_config.pageSize);
-  const int64_t windowEnd =
-      std::min<int64_t>(maxPage, lastPage + static_cast<int64_t>(m_windowPages));
+  const int64_t now = NowMs();
+  int64_t windowEnd = 0;
 
   int64_t queueFrom = 0;
-  bool jumped = false;
+  uint64_t runId = 0;
+  bool sequential = false;
+  std::vector<uint64_t> gone;
   {
     std::lock_guard<std::mutex> lock(m_cacheMutex);
+    file->lastReadEndPage = lastPage;
+
     // Only read ahead for a reader walking forward. libbluray interleaves
     // index/clip lookups with the stream, and reading ahead of one of those
-    // pulls a window nobody wants. An unknown position - start of play, or
-    // just after a jump - establishes the anchor; the next read prefetches.
-    if (file->lastReadEndPage < 0 || lastPage < file->lastReadEndPage ||
-        lastPage > file->lastReadEndPage + 1)
+    // pulls a window nobody wants: a read that continues no run starts one,
+    // and only its next read queues anything.
+    FileState::Run* run = nullptr;
+    for (auto& r : file->runs)
+      if (r.id != 0 && lastPage >= r.lastEnd && lastPage <= r.lastEnd + 1)
+        run = &r;
+
+    if (!run)
     {
-      jumped = file->lastReadEndPage >= 0;
-      file->lastReadEndPage = lastPage;
-      file->prefetchHorizon = -1;
+      // A new run, in a free slot or in place of the least recently read.
+      FileState::Run* slot = &file->runs[0];
+      for (auto& r : file->runs)
+      {
+        if (r.id == 0)
+        {
+          slot = &r;
+          break;
+        }
+        if (r.usedMs < slot->usedMs)
+          slot = &r;
+      }
+      if (slot->id != 0)
+        gone.push_back(slot->id);
+      *slot = FileState::Run{m_nextRunId++, lastPage, -1, now};
     }
     else
     {
-      file->lastReadEndPage = lastPage;
-      queueFrom = std::max<int64_t>(lastPage + 1, file->prefetchHorizon + 1);
-      if (queueFrom > windowEnd)
-        return;
-      file->prefetchHorizon = windowEnd;
+      sequential = true;
+      run->lastEnd = lastPage;
+      run->usedMs = now;
+      runId = run->id;
+      // The window is shared by the runs reading ahead now, or two of them
+      // oversubscribe the arena and each evicts the other's window.
+      int64_t active = 0;
+      for (const auto& r : file->runs)
+        if (r.id != 0 && r.horizon >= 0 && now - r.usedMs <= RUN_IDLE_MS)
+          ++active;
+      if (run->horizon < 0)
+        ++active; // this one is about to start
+      const int64_t share =
+          std::max<int64_t>(1, static_cast<int64_t>(m_windowPages) / std::max<int64_t>(1, active));
+      windowEnd = std::min<int64_t>(maxPage, lastPage + share);
+      queueFrom = std::max<int64_t>(lastPage + 1, run->horizon + 1);
+      if (queueFrom <= windowEnd)
+        run->horizon = windowEnd;
     }
+
+    for (auto& r : file->runs)
+      if (r.id != 0 && r.id != runId && now - r.usedMs > RUN_IDLE_MS)
+      {
+        gone.push_back(r.id);
+        r = FileState::Run{};
+      }
   }
 
-  if (jumped)
-  {
-    // What was queued for the region just left would otherwise be fetched
-    // first, and the new window queued behind it: on a resume - the open
-    // reads the clip head sequentially, arming a window the size of the
-    // arena, then seeks - that is every page of the arena fetched for
-    // nothing before the reader's region gets the link.
-    DropStaleWindow(file.get(), lastPage);
+  if (!gone.empty())
+    DropRunWork(gone);
+  if (!sequential)
     return;
-  }
 
+  {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    m_runUsedMs[runId] = now;
+  }
   for (int64_t page = queueFrom; page <= windowEnd; ++page)
-    QueuePage(file, page);
+    QueuePage(file, page, false, runId);
 }
 
-void CBlurayStreamCache::DropStaleWindow(const FileState* file, int64_t lastPage)
+void CBlurayStreamCache::DropRunWork(const std::vector<uint64_t>& runIds)
 {
-  const int64_t windowEnd = lastPage + static_cast<int64_t>(m_windowPages);
   std::lock_guard<std::mutex> lock(m_queueMutex);
   m_window.erase(std::remove_if(m_window.begin(), m_window.end(),
                                 [&](const Work& work) {
-                                  if (work.file.get() != file ||
-                                      (work.pageIndex > lastPage && work.pageIndex <= windowEnd))
+                                  if (work.urgent || work.runId == 0 ||
+                                      std::find(runIds.begin(), runIds.end(), work.runId) ==
+                                          runIds.end())
                                     return false;
                                   m_queued.erase(WorkKey(work.file->path, work.pageIndex));
                                   return true;
                                 }),
                  m_window.end());
+  for (const uint64_t id : runIds)
+    m_runUsedMs.erase(id);
+}
+
+CBlurayStreamCache::Work CBlurayStreamCache::PopWindowLocked()
+{
+  auto pick = m_window.begin();
+  if (!pick->urgent)
+  {
+    // The nearest page (queue order) of the most recently read run.
+    int64_t best = -1;
+    for (auto it = m_window.begin(); it != m_window.end(); ++it)
+    {
+      if (it->urgent)
+      {
+        pick = it;
+        break;
+      }
+      const auto used = m_runUsedMs.find(it->runId);
+      const int64_t usedMs = used != m_runUsedMs.end() ? used->second : 0;
+      if (usedMs > best)
+      {
+        best = usedMs;
+        pick = it;
+      }
+    }
+  }
+  Work work = *pick;
+  m_window.erase(pick);
+  m_queued.erase(WorkKey(work.file->path, work.pageIndex));
+  return work;
 }
 
 void CBlurayStreamCache::QueuePage(const std::shared_ptr<FileState>& file,
                                    int64_t pageIndex,
-                                   bool urgent)
+                                   bool urgent,
+                                   uint64_t runId)
 {
   if (pageIndex < 0 || file->length <= 0)
     return;
@@ -968,16 +1060,17 @@ void CBlurayStreamCache::QueuePage(const std::shared_ptr<FileState>& file,
       auto it = std::find_if(m_window.begin(), m_window.end(), [&](const Work& work) {
         return work.file == file && work.pageIndex == pageIndex;
       });
-      if (it == m_window.end() || it == m_window.begin())
+      if (it == m_window.end())
         return;
-      const Work work = *it;
+      Work work = *it;
+      work.urgent = true;
       m_window.erase(it);
       m_window.push_front(work);
     }
     else if (urgent)
     {
       // The page a reader is waiting for goes ahead of all read-ahead.
-      m_window.push_front(Work{file, pageIndex});
+      m_window.push_front(Work{file, pageIndex, 0, true});
     }
     else
     {
@@ -985,7 +1078,7 @@ void CBlurayStreamCache::QueuePage(const std::shared_ptr<FileState>& file,
       // ahead of the reader, so the nearest outstanding page stays at the
       // head, where the worker pops. Feeding the far end first starves the
       // very next read.
-      m_window.push_back(Work{file, pageIndex});
+      m_window.push_back(Work{file, pageIndex, runId, false});
     }
   }
   m_queueChanged.notify_one();
@@ -1206,9 +1299,7 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
       return true;
     }
 
-    work = m_window.front();
-    m_window.pop_front();
-    m_queued.erase(WorkKey(work.file->path, work.pageIndex));
+    work = PopWindowLocked();
   }
 
   {
