@@ -176,6 +176,7 @@ struct Hdr10PlusPqValues {
 
 static std::vector<uint8_t> last_rpu;
 static Hdr10PlusPqValues last_pq = {};
+static bool last_failed = false;
 
 std::vector<uint8_t> create_rpu_nalu_for_hdr10plus(
   const Hdr10PlusMetadata& meta,
@@ -239,7 +240,13 @@ std::vector<uint8_t> create_rpu_nalu_for_hdr10plus(
   if (pq == last_pq)
     return last_rpu;
 
+  // Keyed before generating, so a failed generation must not leave the key:
+  // the previous scene's RPU - possibly another title's - was then returned
+  // for these values, and every frame of the scene after. On failure the
+  // frame gets no RPU, and the next one tries again.
   last_pq = pq;
+  last_rpu.clear();
+  bool generated = false;
 
 #ifdef HAVE_LIBDOVI
   std::string json = fmt::format(
@@ -262,11 +269,23 @@ std::vector<uint8_t> create_rpu_nalu_for_hdr10plus(
     if (data)
     {
       last_rpu.assign(data->data, data->data + data->len);
+      generated = !last_rpu.empty();
       dovi_data_free(data);
     }
   }
   if (list) dovi_rpu_list_free(list);
 #endif
+
+  if (!generated)
+  {
+    last_pq = {};
+    if (!last_failed)
+      CLog::Log(LOGWARNING,
+                "HDR10PlusConvert::create_rpu_nalu_for_hdr10plus - RPU generation failed");
+    last_failed = true;
+    return {};
+  }
+  last_failed = false;
 
   CLog::Log(LOGINFO, "HDR10PlusConvert::create_rpu_nalu_for_hdr10plus min_pq [{}] max_pq [{}] avg_pq [{}] mdml max [{}] mdml min [{}] cll [{}] fall [{}]",
     pq.min_pq, pq.max_pq, pq.avg_pq,
