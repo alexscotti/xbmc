@@ -26,6 +26,11 @@ namespace
 // owner is whoever set it, and only that cache clears it.
 std::atomic<bool> g_arenaClaimed{false};
 
+// Abandoned workers still running, across every session: each one is a
+// thread still inside a network call. It is decremented by the thread itself
+// as it exits, so it bounds what is actually alive, not abandons ever made.
+std::atomic<unsigned int> g_abandonedRunning{0};
+
 int64_t NowMs()
 {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -167,13 +172,13 @@ CBlurayStreamCache::~CBlurayStreamCache()
     m_primes.clear();
     m_queued.clear();
 
-    if (m_workerCtx && m_workerCtx->readStartMs.load() != 0 && m_abandoned < m_config.abandonMax)
-    {
-      // Stuck in a source read. Leave it running rather than make the close
-      // wait out the network: it owns its own handle and buffer, and once
-      // `owner` is cleared it cannot touch anything of ours again.
-      AbandonWorkerLocked(lock, "close");
-    }
+    // Inside a source open or read: leave it running rather than make the
+    // close wait out the network. It owns its own handle and buffer, and once
+    // abandoned it cannot touch anything of ours again. A worker that is not
+    // inside one is only ever a moment from noticing the stop, so it is
+    // joined - and must be, since it may be using the cache right now.
+    if (m_workerCtx && g_abandonedRunning.load() < m_config.abandonMax)
+      AbandonIfBlockedLocked(lock, "close", 0);
   }
   m_queueChanged.notify_all();
 
@@ -353,7 +358,7 @@ void CBlurayStreamCache::SetChainHint(const std::string& currentPath,
       std::lock_guard<std::mutex> lock(m_queueMutex);
       m_primes.erase(std::remove_if(m_primes.begin(), m_primes.end(),
                                     [&dropped](const PrimeJob& job) {
-                                      return PrimeKey(job.path, job.offset) == dropped;
+                                      return job.key == dropped;
                                     }),
                      m_primes.end());
     }
@@ -395,10 +400,10 @@ void CBlurayStreamCache::MaybeQueuePrime(const std::shared_ptr<FileState>& file,
       return;
     job.path = m_hintNext;
     job.offset = m_hintNextOffset;
-    const std::string key = PrimeKey(job.path, job.offset);
-    if (m_primeQueuedFor == key)
+    job.key = PrimeKey(job.path, job.offset);
+    if (m_primeQueuedFor == job.key)
       return; // already queued or done
-    m_primeQueuedFor = key;
+    m_primeQueuedFor = job.key;
     sameClip = (job.path == m_hintCurrent);
     if (sameClip)
     {
@@ -564,7 +569,7 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
         // reading it on this thread. This is the whole ride-through: the
         // thread that must stay responsive never enters a network read.
         lock.unlock();
-        QueuePage(file, pageIndex);
+        QueuePage(file, pageIndex, true);
         lock.lock();
         if (file->pages.find(pageIndex) != file->pages.end() ||
             file->failedPages.find(pageIndex) != file->failedPages.end() || m_aborted)
@@ -853,6 +858,7 @@ void CBlurayStreamCache::QueueForwardWindow(const std::shared_ptr<FileState>& fi
       std::min<int64_t>(maxPage, lastPage + static_cast<int64_t>(m_windowPages));
 
   int64_t queueFrom = 0;
+  bool jumped = false;
   {
     std::lock_guard<std::mutex> lock(m_cacheMutex);
     // Only read ahead for a reader walking forward. libbluray interleaves
@@ -862,23 +868,53 @@ void CBlurayStreamCache::QueueForwardWindow(const std::shared_ptr<FileState>& fi
     if (file->lastReadEndPage < 0 || lastPage < file->lastReadEndPage ||
         lastPage > file->lastReadEndPage + 1)
     {
+      jumped = file->lastReadEndPage >= 0;
       file->lastReadEndPage = lastPage;
       file->prefetchHorizon = -1;
-      return;
     }
+    else
+    {
+      file->lastReadEndPage = lastPage;
+      queueFrom = std::max<int64_t>(lastPage + 1, file->prefetchHorizon + 1);
+      if (queueFrom > windowEnd)
+        return;
+      file->prefetchHorizon = windowEnd;
+    }
+  }
 
-    file->lastReadEndPage = lastPage;
-    queueFrom = std::max<int64_t>(lastPage + 1, file->prefetchHorizon + 1);
-    if (queueFrom > windowEnd)
-      return;
-    file->prefetchHorizon = windowEnd;
+  if (jumped)
+  {
+    // What was queued for the region just left would otherwise be fetched
+    // first, and the new window queued behind it: on a resume - the open
+    // reads the clip head sequentially, arming a window the size of the
+    // arena, then seeks - that is every page of the arena fetched for
+    // nothing before the reader's region gets the link.
+    DropStaleWindow(file.get(), lastPage);
+    return;
   }
 
   for (int64_t page = queueFrom; page <= windowEnd; ++page)
     QueuePage(file, page);
 }
 
-void CBlurayStreamCache::QueuePage(const std::shared_ptr<FileState>& file, int64_t pageIndex)
+void CBlurayStreamCache::DropStaleWindow(const FileState* file, int64_t lastPage)
+{
+  const int64_t windowEnd = lastPage + static_cast<int64_t>(m_windowPages);
+  std::lock_guard<std::mutex> lock(m_queueMutex);
+  m_window.erase(std::remove_if(m_window.begin(), m_window.end(),
+                                [&](const Work& work) {
+                                  if (work.file.get() != file ||
+                                      (work.pageIndex > lastPage && work.pageIndex <= windowEnd))
+                                    return false;
+                                  m_queued.erase(WorkKey(work.file->path, work.pageIndex));
+                                  return true;
+                                }),
+                 m_window.end());
+}
+
+void CBlurayStreamCache::QueuePage(const std::shared_ptr<FileState>& file,
+                                   int64_t pageIndex,
+                                   bool urgent)
 {
   if (pageIndex < 0 || file->length <= 0)
     return;
@@ -896,21 +932,48 @@ void CBlurayStreamCache::QueuePage(const std::shared_ptr<FileState>& file, int64
     if (m_stopWorker || m_aborted)
       return;
     if (!m_queued.insert(WorkKey(file->path, pageIndex)).second)
-      return;
-    // Always the back: the queue is ordered by distance ahead of the reader,
-    // so the nearest outstanding page stays at the head, where the worker
-    // pops. Feeding the far end first starves the very next read.
-    m_window.push_back(Work{file, pageIndex});
+    {
+      if (!urgent)
+        return;
+      // Already queued, maybe far down: a reader is waiting for it now.
+      auto it = std::find_if(m_window.begin(), m_window.end(), [&](const Work& work) {
+        return work.file == file && work.pageIndex == pageIndex;
+      });
+      if (it == m_window.end() || it == m_window.begin())
+        return;
+      const Work work = *it;
+      m_window.erase(it);
+      m_window.push_front(work);
+    }
+    else if (urgent)
+    {
+      // The page a reader is waiting for goes ahead of all read-ahead.
+      m_window.push_front(Work{file, pageIndex});
+    }
+    else
+    {
+      // Read-ahead always goes to the back: the queue is ordered by distance
+      // ahead of the reader, so the nearest outstanding page stays at the
+      // head, where the worker pops. Feeding the far end first starves the
+      // very next read.
+      m_window.push_back(Work{file, pageIndex});
+    }
   }
   m_queueChanged.notify_one();
 }
 
-void CBlurayStreamCache::StartWorker()
+std::shared_ptr<CBlurayStreamCache::WorkerCtx> CBlurayStreamCache::NewWorkerCtx()
 {
   auto ctx = std::make_shared<WorkerCtx>();
   ctx->owner = this;
+  ctx->factory = m_factory;
   ctx->buffer.resize(m_config.pageSize);
+  return ctx;
+}
 
+void CBlurayStreamCache::StartWorker()
+{
+  auto ctx = NewWorkerCtx();
   {
     std::lock_guard<std::mutex> lock(m_queueMutex);
     m_stopWorker = false;
@@ -922,39 +985,50 @@ void CBlurayStreamCache::StartWorker()
 bool CBlurayStreamCache::CheckWorkerStall()
 {
   std::unique_lock<std::mutex> lock(m_queueMutex);
-  if (m_stopWorker || !m_workerCtx || m_abandoned >= m_config.abandonMax)
+  if (m_stopWorker || !m_workerCtx || g_abandonedRunning.load() >= m_config.abandonMax)
     return false;
 
-  const int64_t started = m_workerCtx->readStartMs.load();
-  if (started == 0 || (NowMs() - started) < static_cast<int64_t>(m_config.abandonAfterMs))
+  if (!AbandonIfBlockedLocked(lock, "stalled", m_config.abandonAfterMs))
     return false;
-
-  AbandonWorkerLocked(lock, "stalled");
+  if (m_stopWorker)
+    return true;
 
   // A replacement, so the window fills again as soon as the link returns.
-  auto ctx = std::make_shared<WorkerCtx>();
-  ctx->owner = this;
-  ctx->buffer.resize(m_config.pageSize);
+  // On smb:// and nfs:// it will block in its first open until the stuck
+  // read gives up the process-wide lock; that open is abandonable too.
+  auto ctx = NewWorkerCtx();
   m_workerCtx = ctx;
   m_worker = std::thread(&CBlurayStreamCache::Worker, ctx);
   return true;
 }
 
-void CBlurayStreamCache::AbandonWorkerLocked(std::unique_lock<std::mutex>& queueLock,
-                                             const char* reason)
+bool CBlurayStreamCache::AbandonIfBlockedLocked(std::unique_lock<std::mutex>& queueLock,
+                                                const char* reason,
+                                                int64_t minBlockedMs)
 {
   auto ctx = m_workerCtx;
-  m_workerCtx.reset();
-  ++m_abandoned;
+  if (!ctx)
+    return false;
 
   {
     std::lock_guard<std::mutex> lock(ctx->mutex);
-    // Cleared first: from here the thread cannot reach this cache at all, so
-    // it is safe for it to outlive us.
+    // The decision is taken under the same lock the worker takes on its way
+    // out of a source call, so it cannot pass a worker that has just come
+    // out and is about to use the cache.
+    if (!ctx->blocked)
+      return false;
+    const int64_t since = ctx->blockedSinceMs.load();
+    if (since == 0 || NowMs() - since < minBlockedMs)
+      return false;
     ctx->owner = nullptr;
+    ctx->abandoned = true;
     ctx->cancel.store(true);
+    // Counted here, under ctx->mutex, and uncounted by the thread under the
+    // same lock as it exits, so the two can never miss each other.
+    ++g_abandonedRunning;
   }
 
+  m_workerCtx.reset();
   if (m_worker.joinable())
     m_worker.detach();
 
@@ -963,18 +1037,22 @@ void CBlurayStreamCache::AbandonWorkerLocked(std::unique_lock<std::mutex>& queue
     ++m_stats.workersAbandoned;
   }
 
+  const unsigned int running = g_abandonedRunning.load();
   queueLock.unlock();
   CLog::Log(LOGINFO,
-            "CBlurayStreamCache - worker abandoned ({}), it is stuck in a source read; {} of {} "
-            "used",
-            reason, m_abandoned, m_config.abandonMax);
+            "CBlurayStreamCache - worker abandoned ({}), it is stuck in a source call; {} of {} "
+            "still running",
+            reason, running, m_config.abandonMax);
   queueLock.lock();
+  return true;
 }
 
 void CBlurayStreamCache::Worker(std::shared_ptr<WorkerCtx> ctx)
 {
   while (!ctx->cancel.load())
   {
+    // Not inside a source call here, so this worker cannot be abandoned
+    // until it next enters one: a non-null owner stays valid throughout.
     CBlurayStreamCache* owner = nullptr;
     {
       std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -986,11 +1064,38 @@ void CBlurayStreamCache::Worker(std::shared_ptr<WorkerCtx> ctx)
     if (!owner->RunOneWorkItem(*ctx))
       break;
   }
+
+  // Sources are closed here, on this thread, so an abandoned worker's close
+  // - which on smb:// takes the same process-wide lock - is its own wait.
+  ctx->sources.clear();
+  std::lock_guard<std::mutex> lock(ctx->mutex);
+  if (ctx->abandoned)
+    --g_abandonedRunning;
+}
+
+bool CBlurayStreamCache::BeginBlocking(WorkerCtx& ctx)
+{
+  std::lock_guard<std::mutex> lock(ctx.mutex);
+  if (!ctx.owner || ctx.cancel.load())
+    return false;
+  ctx.blocked = true;
+  ctx.blockedSinceMs.store(NowMs());
+  return true;
+}
+
+bool CBlurayStreamCache::EndBlocking(WorkerCtx& ctx)
+{
+  std::lock_guard<std::mutex> lock(ctx.mutex);
+  ctx.blocked = false;
+  ctx.blockedSinceMs.store(0);
+  return ctx.owner != nullptr;
 }
 
 CBlurayStreamCache::ISource* CBlurayStreamCache::GetWorkerSource(WorkerCtx& ctx,
-                                                                 const std::string& path)
+                                                                 const std::string& path,
+                                                                 bool& stop)
 {
+  stop = false;
   auto it = ctx.sources.find(path);
   if (it != ctx.sources.end())
     return it->second.get();
@@ -1000,11 +1105,23 @@ CBlurayStreamCache::ISource* CBlurayStreamCache::GetWorkerSource(WorkerCtx& ctx,
   if (ctx.sources.size() >= 2)
     ctx.sources.clear();
 
-  auto source = m_factory(path);
-  if (!source)
+  // An open is a network call like any read: on smb:// it waits on the
+  // process-wide lock behind any stuck read, so it is abandonable the same way.
+  if (!BeginBlocking(ctx))
+  {
+    stop = true;
     return nullptr;
-  auto* raw = source.get();
-  ctx.sources.emplace(path, std::move(source));
+  }
+  auto source = ctx.factory(path);
+  const bool live = EndBlocking(ctx);
+  ISource* raw = source.get();
+  if (source)
+    ctx.sources.emplace(path, std::move(source)); // ours either way; closed by this thread
+  if (!live)
+  {
+    stop = true;
+    return nullptr;
+  }
   return raw;
 }
 
@@ -1027,7 +1144,7 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
       const PrimeJob prime = m_primes.front();
       m_primes.pop_front();
       lock.unlock();
-      RunPrime(ctx, prime.path, prime.offset);
+      RunPrime(ctx, prime);
       return true;
     }
 
@@ -1049,16 +1166,20 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
     return true;
 
   int64_t read = -1;
-  for (unsigned int attempt = 0; attempt < PAGE_READ_ATTEMPTS && !ctx.cancel.load(); ++attempt)
+  for (unsigned int attempt = 0; attempt < PAGE_READ_ATTEMPTS; ++attempt)
   {
-    ISource* source = GetWorkerSource(ctx, work.file->path);
+    bool stop = false;
+    ISource* source = GetWorkerSource(ctx, work.file->path, stop);
+    if (stop)
+      return false; // cancelled, or abandoned in the open: touch nothing
     if (!source)
       break;
 
-    // The watchdog reads this without the lock to spot a wedged read.
-    ctx.readStartMs.store(NowMs());
+    if (!BeginBlocking(ctx))
+      return false;
     read = source->ReadAt(offset, ctx.buffer.data(), bytesToRead);
-    ctx.readStartMs.store(0);
+    if (!EndBlocking(ctx))
+      return false; // abandoned while we were in the read; touch nothing
 
     if (read == static_cast<int64_t>(bytesToRead))
       break;
@@ -1073,13 +1194,14 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
       ++m_stats.retries;
     }
     if (attempt + 1 < PAGE_READ_ATTEMPTS)
-      std::this_thread::sleep_for(std::chrono::milliseconds(PAGE_RETRY_BASE_MS << attempt));
-  }
-
-  {
-    std::lock_guard<std::mutex> ctxLock(ctx.mutex);
-    if (!ctx.owner)
-      return false; // abandoned while we were in the read; touch nothing
+    {
+      // In slices, so a close does not have to wait out the back-off.
+      const int64_t until = NowMs() + (PAGE_RETRY_BASE_MS << attempt);
+      while (!ctx.cancel.load() && NowMs() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (ctx.cancel.load())
+      return false;
   }
 
   {
@@ -1101,9 +1223,13 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
   return true;
 }
 
-void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const std::string& path, int64_t startOffset)
+void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const PrimeJob& job)
 {
-  ISource* source = GetWorkerSource(ctx, path);
+  const std::string& path = job.path;
+  bool stop = false;
+  ISource* source = GetWorkerSource(ctx, path, stop);
+  if (stop)
+    return;
   if (!source)
   {
     CLog::Log(LOGDEBUG, "CBlurayStreamCache - prime of {} could not be opened",
@@ -1132,15 +1258,21 @@ void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const std::string& path, int64
   }
 
   // A same-clip prime starts at the next playitem's first packet, not at 0.
-  const int64_t firstPage = (startOffset > 0)
-                                ? startOffset / static_cast<int64_t>(m_config.pageSize)
+  const int64_t firstPage = (job.offset > 0)
+                                ? job.offset / static_cast<int64_t>(m_config.pageSize)
                                 : 0;
   const int64_t lastPage = (length - 1) / static_cast<int64_t>(m_config.pageSize);
   if (firstPage > lastPage)
     return;
-  const int64_t pages = std::min<int64_t>(
-      static_cast<int64_t>((m_config.nextSizeBytes + m_config.pageSize - 1) / m_config.pageSize),
-      lastPage - firstPage + 1);
+  // A prime resumed after a yield gets what is left of its budget, not a new
+  // one: re-computing it from the resume offset let every yield extend the
+  // prime by another full nextSizeBytes.
+  const int64_t budget =
+      job.pagesLeft >= 0
+          ? job.pagesLeft
+          : static_cast<int64_t>((m_config.nextSizeBytes + m_config.pageSize - 1) /
+                                 m_config.pageSize);
+  const int64_t pages = std::min<int64_t>(budget, lastPage - firstPage + 1);
 
   for (int64_t n = 0; n < pages; ++n)
   {
@@ -1148,15 +1280,25 @@ void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const std::string& path, int64
     if (ctx.cancel.load() || m_aborted)
       return;
 
+    // Still wanted? A republished hint drops a prime that is no longer next,
+    // and an adopted one is the window's business from here. The drop in
+    // SetChainHint only reaches a prime that is QUEUED; this reaches the one
+    // that is running.
+    {
+      std::lock_guard<std::mutex> lock(m_hintMutex);
+      if (m_primeQueuedFor != job.key)
+        return;
+    }
+
     // Yield at every page boundary: if the clip being watched needs a page,
     // it goes first and the rest of this prime waits its turn.
     {
       std::lock_guard<std::mutex> lock(m_queueMutex);
       if (!m_window.empty())
       {
-        // Resume where this prime got to, not where it began.
+        // Resume where this prime got to, with what is left of its budget.
         m_primes.push_front(
-            PrimeJob{path, page * static_cast<int64_t>(m_config.pageSize)});
+            PrimeJob{path, page * static_cast<int64_t>(m_config.pageSize), job.key, pages - n});
         return;
       }
     }
@@ -1171,15 +1313,11 @@ void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const std::string& path, int64
     const size_t want = static_cast<size_t>(
         std::min<int64_t>(static_cast<int64_t>(m_config.pageSize), length - offset));
 
-    ctx.readStartMs.store(NowMs());
+    if (!BeginBlocking(ctx))
+      return;
     const int64_t read = source->ReadAt(offset, ctx.buffer.data(), want);
-    ctx.readStartMs.store(0);
-
-    {
-      std::lock_guard<std::mutex> ctxLock(ctx.mutex);
-      if (!ctx.owner)
-        return;
-    }
+    if (!EndBlocking(ctx))
+      return; // abandoned while we were in the read; touch nothing
 
     if (read != static_cast<int64_t>(want))
     {

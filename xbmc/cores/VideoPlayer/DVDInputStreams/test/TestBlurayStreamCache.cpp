@@ -41,20 +41,43 @@ struct FakeFile
   std::atomic<int> reads{0};
   std::atomic<bool> stalled{false}; // every read blocks: a NAS outage
   std::atomic<int> failNextReads{0};
+  std::atomic<int> delayMs{0}; // every read takes this long: a slow link
+  // Pages of this file the source has been asked for, in order.
+  std::mutex readLog;
+  std::vector<int64_t> pagesRead;
+  // One lock across every source, held for the whole of an open and a read,
+  // as libsmbclient's process-wide `smb` lock (and gNfsConnection) is: a read
+  // stuck in the network blocks every other open and read in the process.
+  std::shared_ptr<std::mutex> processLock;
 };
 
 class CFakeSource : public CBlurayStreamCache::ISource
 {
 public:
-  explicit CFakeSource(FakeFile* file) : m_file(file) { ++m_file->opens; }
+  explicit CFakeSource(std::shared_ptr<FakeFile> file) : m_file(std::move(file))
+  {
+    std::unique_lock<std::mutex> lock;
+    if (m_file->processLock)
+      lock = std::unique_lock<std::mutex>(*m_file->processLock);
+    ++m_file->opens;
+  }
 
   int64_t GetLength() override { return m_file->length; }
 
   int64_t ReadAt(int64_t offset, uint8_t* buffer, size_t size) override
   {
+    std::unique_lock<std::mutex> lock;
+    if (m_file->processLock)
+      lock = std::unique_lock<std::mutex>(*m_file->processLock);
     ++m_file->reads;
+    {
+      std::lock_guard<std::mutex> logLock(m_file->readLog);
+      m_file->pagesRead.push_back(offset / static_cast<int64_t>(PAGE));
+    }
     while (m_file->stalled.load())
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    if (m_file->delayMs.load() > 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(m_file->delayMs.load()));
     if (m_file->failNextReads.load() > 0)
     {
       --m_file->failNextReads;
@@ -70,8 +93,17 @@ public:
   }
 
 private:
-  FakeFile* m_file;
+  // Shared, not borrowed: a worker abandoned in a stalled read can outlive
+  // the test that started it, and must still find its file when it wakes.
+  std::shared_ptr<FakeFile> m_file;
 };
+
+int64_t MsSince(std::chrono::steady_clock::time_point start)
+{
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                               start)
+      .count();
+}
 
 class BlurayStreamCacheTest : public ::testing::Test
 {
@@ -89,14 +121,12 @@ protected:
 
   FakeFile* AddFile(const std::string& path, int id, int64_t pages)
   {
-    auto file = std::make_unique<FakeFile>();
+    auto file = std::make_shared<FakeFile>();
     file->id = id;
     file->length = pages * static_cast<int64_t>(PAGE);
-    auto* raw = file.get();
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_owned.push_back(std::move(file));
-    m_files[path] = raw;
-    return raw;
+    m_files[path] = file;
+    return file.get();
   }
 
   static CBlurayStreamCache::Config Config(size_t arenaPages = 16)
@@ -121,8 +151,7 @@ protected:
   }
 
   std::mutex m_mutex;
-  std::map<std::string, FakeFile*> m_files;
-  std::vector<std::unique_ptr<FakeFile>> m_owned;
+  std::map<std::string, std::shared_ptr<FakeFile>> m_files;
 };
 } // namespace
 
@@ -518,4 +547,219 @@ TEST_F(BlurayStreamCacheTest, AnArenaTooSmallToBeUsefulIsRefused)
 
   config.arenaBytes = 0;
   EXPECT_EQ(CBlurayStreamCache::Claim(config, Factory()), nullptr);
+}
+
+// Review finding 1. On smb:// and nfs:// every open and read in the process is
+// serialised by one lock that a read holds for as long as the network does.
+// A replacement worker started for a stuck one blocks OPENING its source on
+// that lock, outside any read - and close must abandon it too, not join it.
+TEST_F(BlurayStreamCacheTest, CloseDoesNotWaitForAWorkerBlockedOpeningBehindAStuckRead)
+{
+  FakeFile* clip = AddFile("clip", 20, 100);
+  clip->processLock = std::make_shared<std::mutex>();
+
+  auto cache = CBlurayStreamCache::Claim(Config(), Factory());
+  ASSERT_NE(cache, nullptr);
+  auto view = cache->OpenFile("clip");
+  ASSERT_NE(view, nullptr);
+
+  clip->stalled.store(true);
+  std::thread reader([&] {
+    std::vector<uint8_t> b(4096);
+    view->Read(b.data(), b.size());
+  });
+  // Past abandonAfterMs (300) plus a reader wake-up (250): the first worker
+  // is abandoned and its replacement is now blocked opening the clip.
+  std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  ASSERT_GE(cache->GetStats().workersAbandoned, 1u) << "the stuck worker was never replaced";
+
+  cache->Abort();
+  reader.join();
+  view.reset();
+
+  // The network comes back on its own after 2 s, so a close that waits for
+  // it fails the test instead of hanging it.
+  std::thread link([clip] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    clip->stalled.store(false);
+  });
+  const auto start = std::chrono::steady_clock::now();
+  cache.reset();
+  const int64_t ms = MsSince(start);
+  clip->stalled.store(false);
+  link.join();
+  EXPECT_LT(ms, 250) << "close waited for a worker blocked behind the stuck read";
+  std::this_thread::sleep_for(std::chrono::milliseconds(200)); // let the orphans exit
+}
+
+// Review finding 3. A worker abandoned at close whose stalled read then FAILS
+// - the normal end of a network timeout - must not touch the destroyed cache
+// on its way to the retry. Caught by ASan/TSan as a use-after-free.
+TEST_F(BlurayStreamCacheTest, AnAbandonedWorkerWhoseReadFailsTouchesNothing)
+{
+  FakeFile* clip = AddFile("clip", 21, 100);
+  auto cache = CBlurayStreamCache::Claim(Config(), Factory());
+  ASSERT_NE(cache, nullptr);
+  auto view = cache->OpenFile("clip");
+
+  clip->stalled.store(true);
+  std::thread reader([&] {
+    std::vector<uint8_t> b(4096);
+    view->Read(b.data(), b.size());
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(120)); // worker in the stalled read
+  cache->Abort();
+  reader.join();
+  view.reset();
+  cache.reset(); // abandons the worker
+
+  clip->failNextReads.store(1);
+  clip->stalled.store(false); // the read returns, and it is an error
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+}
+
+// Review finding 5. abandonMax bounds threads still RUNNING. An abandoned
+// thread whose read has returned has gone, and must stop counting, or a long
+// film's fifth stall is never ridden through and its Stop joins again.
+TEST_F(BlurayStreamCacheTest, AnAbandonedThreadThatExitedFreesItsSlot)
+{
+  FakeFile* clip = AddFile("clip", 22, 400);
+  CBlurayStreamCache::Config config = Config();
+  config.abandonMax = 1;
+  auto cache = CBlurayStreamCache::Claim(config, Factory());
+  ASSERT_NE(cache, nullptr);
+  auto view = cache->OpenFile("clip");
+
+  std::vector<uint8_t> buffer(4096);
+  for (int stall = 0; stall < 3; ++stall)
+  {
+    clip->stalled.store(true);
+    view->Seek((50 + 100 * stall) * static_cast<int64_t>(PAGE), SEEK_SET);
+    std::thread reader([&] {
+      std::vector<uint8_t> b(4096);
+      view->Read(b.data(), b.size());
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    clip->stalled.store(false); // the link comes back; the abandoned read returns
+    reader.join();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    EXPECT_EQ(cache->GetStats().workersAbandoned, static_cast<uint64_t>(stall + 1))
+        << "stall " << stall << " was not ridden through";
+  }
+}
+
+// Review finding 4. A seek must not queue the page the reader is waiting for
+// behind the window it just left: on a resume or chapter skip that window is
+// up to the whole arena of stale fetches.
+TEST_F(BlurayStreamCacheTest, ASeekIsNotQueuedBehindTheWindowItLeft)
+{
+  FakeFile* clip = AddFile("clip", 23, 400);
+  auto cache = CBlurayStreamCache::Claim(Config(64), Factory()); // a 57-page window
+  ASSERT_NE(cache, nullptr);
+  auto view = cache->OpenFile("clip");
+
+  std::vector<uint8_t> buffer(4096);
+  view->Read(buffer.data(), buffer.size());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  clip->delayMs.store(20); // a slow link: 57 stale pages would be > 1 s
+  view->Read(buffer.data(), buffer.size()); // sequential: arms the window
+
+  const int64_t target = 300 * static_cast<int64_t>(PAGE);
+  size_t readsBeforeSeek = 0;
+  {
+    std::lock_guard<std::mutex> lock(clip->readLog);
+    readsBeforeSeek = clip->pagesRead.size();
+  }
+  view->Seek(target, SEEK_SET);
+  const auto start = std::chrono::steady_clock::now();
+  const int64_t n = view->Read(buffer.data(), buffer.size());
+  const int64_t ms = MsSince(start);
+  ASSERT_GT(n, 0);
+  EXPECT_TRUE(Matches(buffer, static_cast<size_t>(n), clip->id, target));
+  EXPECT_LT(ms, 200) << "the page after the seek waited behind the old window";
+
+  // And the old window is dropped, not fetched anyway: at most the read that
+  // was already in flight at the seek.
+  view->Read(buffer.data(), buffer.size());
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  int stale = 0;
+  std::string order;
+  {
+    std::lock_guard<std::mutex> lock(clip->readLog);
+    for (size_t i = readsBeforeSeek; i < clip->pagesRead.size(); ++i)
+    {
+      order += std::to_string(clip->pagesRead[i]) + " ";
+      if (clip->pagesRead[i] < 300)
+        ++stale;
+    }
+  }
+  EXPECT_LE(stale, 2) << "the window the seek left was fetched anyway: " << order;
+  clip->delayMs.store(0);
+}
+
+// Review finding 8. A prime that yields to window work resumes with what is
+// LEFT of its budget, not a fresh one, and a hint republish drops it even
+// after it has yielded and re-queued itself.
+TEST_F(BlurayStreamCacheTest, APrimeThatYieldsKeepsItsBudget)
+{
+  AddFile("clipA", 24, 200);
+  FakeFile* second = AddFile("clipB", 25, 100);
+  second->delayMs.store(15); // each prime page takes long enough for window work to arrive
+
+  CBlurayStreamCache::Config config = Config(64);
+  config.nextLeadBytes = 190 * PAGE; // the prime starts at once
+  config.nextSizeBytes = 4 * PAGE;
+  auto cache = CBlurayStreamCache::Claim(config, Factory());
+  ASSERT_NE(cache, nullptr);
+  auto viewA = cache->OpenFile("clipA");
+  cache->SetChainHint("clipA", "clipB");
+
+  // A steady reader: every page it consumes queues one more window page, so
+  // the prime yields at almost every page boundary.
+  std::vector<uint8_t> buffer(16 * 1024);
+  for (int i = 0; i < 600; ++i)
+  {
+    if (viewA->Read(buffer.data(), buffer.size()) <= 0)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+  EXPECT_EQ(cache->GetStats().primesStarted, 1u);
+  EXPECT_LE(cache->GetStats().primePagesFetched, 4u) << "the prime ran past its budget";
+}
+
+TEST_F(BlurayStreamCacheTest, ARepublishDropsAPrimeThatHasYielded)
+{
+  AddFile("clipA", 26, 40);
+  FakeFile* second = AddFile("clipB", 27, 40);
+  AddFile("clipC", 28, 40);
+  second->delayMs.store(40);
+
+  CBlurayStreamCache::Config config = Config(64);
+  config.nextLeadBytes = 30 * PAGE;
+  config.nextSizeBytes = 20 * PAGE;
+  auto cache = CBlurayStreamCache::Claim(config, Factory());
+  ASSERT_NE(cache, nullptr);
+  auto viewA = cache->OpenFile("clipA");
+  cache->SetChainHint("clipA", "clipB");
+
+  std::vector<uint8_t> buffer(16 * 1024);
+  for (int i = 0; i < 40; ++i) // into the lead: the prime starts, and yields to the window
+  {
+    viewA->Read(buffer.data(), buffer.size());
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  }
+  ASSERT_GE(cache->GetStats().primesStarted, 1u);
+
+  cache->SetChainHint("clipA", "clipC"); // clipB is no longer next
+  std::this_thread::sleep_for(std::chrono::milliseconds(100)); // the read in flight lands
+  const int readsAtDrop = second->reads.load();
+  for (int i = 0; i < 40; ++i) // more window work, more chances to resume
+  {
+    viewA->Read(buffer.data(), buffer.size());
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(600));
+  EXPECT_LE(second->reads.load(), readsAtDrop) << "a dropped prime kept fetching";
 }

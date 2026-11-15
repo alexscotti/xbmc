@@ -43,11 +43,13 @@
 //  - The reader never blocks on the network. It waits on a condition variable
 //    for a page a worker is fetching, so an outage shorter than the buffered
 //    time is invisible and Abort() returns every waiter at once.
-//  - A worker blocked in a source read is never joined. It owns its own
-//    source handle and a private buffer, copies into the arena only under the
-//    cache lock and only while its session is live, and is abandoned (and
+//  - A worker blocked in a source open or read is never joined. It owns its
+//    own source handle and a private buffer, copies into the arena only under
+//    the cache lock and only while its session is live, and is abandoned (and
 //    replaced) rather than waited for - at close, and mid-session once it has
-//    been stuck longer than the abandon threshold.
+//    been stuck longer than the abandon threshold. An open counts as much as
+//    a read: on smb:// and nfs:// a replacement blocks in its open behind the
+//    process-wide lock the stuck read holds.
 //  - Memory is a dedicated arena, allocated and pre-faulted once, carved into
 //    fixed pages. A worker never owns an arena page, so a worker abandoned in
 //    a long outage cannot write into memory the next title already owns.
@@ -58,8 +60,12 @@ class CBlurayStreamCache : public std::enable_shared_from_this<CBlurayStreamCach
 {
 public:
   // One open file the cache reads from. Each worker and each fail-open
-  // fallback gets its own, so two reads can be in flight at once and a read
-  // that is stuck cannot hold up a read that is not.
+  // fallback gets its own, so two reads can be in flight at once. That does
+  // NOT make a stuck read harmless to the others: on smb:// and nfs:// every
+  // open and read in the process is serialised by one lock that a stalled
+  // read holds, so a replacement worker blocks too - in its open. What the
+  // cache guarantees is that nobody WAITS for a worker so blocked: an open is
+  // treated exactly like a read, and either is abandoned rather than joined.
   class ISource
   {
   public:
@@ -81,7 +87,9 @@ public:
     // A worker stuck in one source read for longer than this is abandoned and
     // replaced, so the window starts filling again as soon as the link does.
     unsigned int abandonAfterMs{5000};
-    // Bound on threads left running on a dead session. Past it, close waits.
+    // Bound on abandoned threads still running, across every session: one
+    // whose read has since returned has exited and no longer counts. Past
+    // it, a stuck worker is not replaced and close waits for it.
     unsigned int abandonMax{4};
     // Within this much of a clip's end, start pulling the head of the next
     // clip; this much of it. 0 disables chaining.
@@ -266,17 +274,30 @@ private:
   struct FileState;
 
   // Carries one worker's own state. The worker thread holds a shared_ptr to
-  // it, so abandoning the worker costs nothing and touches nothing of ours:
-  // `owner` is cleared under `mutex` first, and the thread only reaches the
-  // cache while it is set.
+  // it, so abandoning the worker costs nothing and touches nothing of ours.
+  //
+  // The handshake that makes that true: a worker is only ever abandoned while
+  // it is INSIDE a source call (`blocked`), and both the decision and the
+  // worker's way out of the call are taken under `mutex`. A worker that comes
+  // out with `owner` still set can therefore no longer be abandoned until it
+  // enters its next call, so it may use the cache freely in between - the
+  // cache joins it rather than leaves it. One that comes out to find `owner`
+  // cleared touches nothing but this struct and returns. Checking `owner`
+  // and then using the cache, with the lock dropped in between, is not
+  // enough: the cache can be abandoned and destroyed in that gap.
   struct WorkerCtx
   {
     std::mutex mutex;
     CBlurayStreamCache* owner{nullptr};
+    bool blocked{false};   // inside a source open or read; under `mutex`
+    bool abandoned{false}; // under `mutex`
     std::atomic<bool> cancel{false};
-    // When the current source read started, in steady-clock ms, or 0 for "not
-    // in a read". Read by the watchdog without the lock.
-    std::atomic<int64_t> readStartMs{0};
+    // When the current source call started, in steady-clock ms, or 0 for
+    // "not in one". Only says HOW LONG; `blocked` says whether.
+    std::atomic<int64_t> blockedSinceMs{0};
+    // The worker's own copy, so a source opened by an abandoned worker never
+    // calls through the cache's member.
+    SourceFactory factory;
     std::vector<uint8_t> buffer;
     // Sources this worker has open, by path. Lazily opened, and only this
     // thread ever touches them.
@@ -354,24 +375,43 @@ private:
   void TouchPageUnlocked(FileState& file, int64_t pageIndex);
   bool ReclaimPageUnlocked(uint8_t*& page);
   void QueueForwardWindow(const std::shared_ptr<FileState>& file, int64_t lastPage);
-  void QueuePage(const std::shared_ptr<FileState>& file, int64_t pageIndex);
+  // `urgent` is the page a reader is waiting for: it goes to the head of the
+  // queue (and moves there if it is already queued), ahead of read-ahead.
+  void QueuePage(const std::shared_ptr<FileState>& file, int64_t pageIndex, bool urgent = false);
+  // After a jump: drops queued window work for `file` that is no longer in
+  // the window ahead of `lastPage`.
+  void DropStaleWindow(const FileState* file, int64_t lastPage);
   // Queues the head of the next clip once the reader is within nextLeadBytes
   // of this file's end. Cheap to call on every read: it does nothing until
   // the threshold, and nothing again once that clip is queued.
   void MaybeQueuePrime(const std::shared_ptr<FileState>& file, int64_t offset);
+  struct PrimeJob;
   // Opens the next clip and pulls its head. Yields to window work at every
   // page boundary, so a 32 MB prime cannot hold the link while the clip being
   // watched drains.
-  void RunPrime(WorkerCtx& ctx, const std::string& path, int64_t startOffset);
+  void RunPrime(WorkerCtx& ctx, const PrimeJob& job);
 
+  std::shared_ptr<WorkerCtx> NewWorkerCtx();
   void StartWorker();
   // Abandons the running worker if it has been stuck longer than the
   // threshold, and starts a replacement. Returns true if it did.
   bool CheckWorkerStall();
-  void AbandonWorkerLocked(std::unique_lock<std::mutex>& queueLock, const char* reason);
+  // Abandons the running worker if, and only if, it is inside a source call
+  // that started at least `minBlockedMs` ago. Returns true if it did.
+  bool AbandonIfBlockedLocked(std::unique_lock<std::mutex>& queueLock,
+                              const char* reason,
+                              int64_t minBlockedMs);
   static void Worker(std::shared_ptr<WorkerCtx> ctx);
   bool RunOneWorkItem(WorkerCtx& ctx);
-  ISource* GetWorkerSource(WorkerCtx& ctx, const std::string& path);
+  // Around every source open and read a worker makes. Begin returns false if
+  // the worker must not start one (cancelled); End returns false if it was
+  // abandoned during it, and then the cache may already be gone. Static, and
+  // touching only `ctx`, for exactly that reason.
+  static bool BeginBlocking(WorkerCtx& ctx);
+  static bool EndBlocking(WorkerCtx& ctx);
+  // nullptr with `stop` false: the open failed. `stop` true: cancelled or
+  // abandoned - return without touching the cache.
+  static ISource* GetWorkerSource(WorkerCtx& ctx, const std::string& path, bool& stop);
 
   int64_t ReadDirect(const std::string& path, int64_t offset, uint8_t* buffer, size_t size);
 
@@ -403,10 +443,12 @@ private:
   {
     std::string path;
     int64_t offset{0};
-    bool operator==(const PrimeJob& other) const
-    {
-      return path == other.path && offset == other.offset;
-    }
+    // PrimeKey of the prime as queued. A prime that yields re-queues itself
+    // at a later offset, and must still be recognised as the same prime -
+    // by SetChainHint's drop, and by its own "am I still wanted" check.
+    std::string key;
+    // Pages of its budget still to fetch; -1 for a prime not yet started.
+    int64_t pagesLeft{-1};
   };
   static std::string PrimeKey(const std::string& path, int64_t offset);
   std::deque<PrimeJob> m_primes;
@@ -414,7 +456,6 @@ private:
   std::thread m_worker;
   std::shared_ptr<WorkerCtx> m_workerCtx;
   bool m_stopWorker{false};
-  unsigned int m_abandoned{0};
 
   std::atomic<bool> m_aborted{false};
   // Pages held back from the window for an in-flight prime, so the window
