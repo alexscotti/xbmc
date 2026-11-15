@@ -664,6 +664,8 @@ int64_t CBlurayStreamCache::ReadAt(const std::string& path,
 
     if (readDirect)
     {
+      if (m_aborted)
+        return done > 0 ? static_cast<int64_t>(done) : -1;
       servedWholeFromCache = false;
       readWaited = true;
       const int64_t n =
@@ -1321,23 +1323,27 @@ bool CBlurayStreamCache::RunOneWorkItem(WorkerCtx& ctx)
     ISource* source = GetWorkerSource(ctx, work.file->path, stop);
     if (stop)
       return false; // cancelled, or abandoned in the open: touch nothing
-    if (!source)
-      break;
 
-    if (!BeginBlocking(ctx))
-      return false;
-    read = source->ReadAt(offset, ctx.buffer.data(), bytesToRead);
-    if (!EndBlocking(ctx))
-      return false; // abandoned while we were in the read; touch nothing
+    // A failed open is retried like a failed read. Giving up on it at once
+    // marked the page failed on the first attempt, and the reader then read
+    // it on its own thread - the network call this cache keeps it out of.
+    if (source)
+    {
+      if (!BeginBlocking(ctx))
+        return false;
+      read = source->ReadAt(offset, ctx.buffer.data(), bytesToRead);
+      if (!EndBlocking(ctx))
+        return false; // abandoned while we were in the read; touch nothing
 
-    if (read == static_cast<int64_t>(bytesToRead))
-      break;
+      if (read == static_cast<int64_t>(bytesToRead))
+        break;
 
-    // Short or failed. Drop the handle - on this link that is usually a
-    // transient the next open rides through - and back off before retrying,
-    // rather than reporting it as the end of the file.
-    if (!CloseSources(ctx, &work.file->path))
-      return false;
+      // Short or failed. Drop the handle - on this link that is usually a
+      // transient the next open rides through - and back off before retrying,
+      // rather than reporting it as the end of the file.
+      if (!CloseSources(ctx, &work.file->path))
+        return false;
+    }
     read = -1;
     {
       std::lock_guard<std::mutex> statsLock(m_statsMutex);
@@ -1387,7 +1393,13 @@ void CBlurayStreamCache::RunPrime(WorkerCtx& ctx, const PrimeJob& job)
     return;
   }
 
+  // GetLength is a source call too: on smb:// it takes the process-wide lock,
+  // which a stuck read anywhere else holds, so it is abandonable like one.
+  if (!BeginBlocking(ctx))
+    return;
   const int64_t length = source->GetLength();
+  if (!EndBlocking(ctx))
+    return;
   if (length <= 0)
     return;
 

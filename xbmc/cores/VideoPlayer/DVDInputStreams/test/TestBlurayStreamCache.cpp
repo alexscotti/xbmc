@@ -126,6 +126,11 @@ protected:
       auto it = m_files.find(path);
       if (it == m_files.end())
         return nullptr;
+      if (m_failOpens.load() > 0)
+      {
+        --m_failOpens;
+        return nullptr;
+      }
       return std::make_unique<CFakeSource>(it->second);
     };
   }
@@ -161,6 +166,8 @@ protected:
     return true;
   }
 
+  // The next this many opens fail, as an open on a dropped link does.
+  std::atomic<int> m_failOpens{0};
   std::mutex m_mutex;
   std::map<std::string, std::shared_ptr<FakeFile>> m_files;
 };
@@ -526,6 +533,23 @@ TEST_F(BlurayStreamCacheTest, APageTheWorkerGivesUpOnIsStillServed)
   ASSERT_GT(n, 0) << "a page the worker could not load must degrade to a direct read, not to EOF";
   EXPECT_TRUE(Matches(buffer, static_cast<size_t>(n), clip->id, 0));
   EXPECT_GT(cache->GetStats().failOpenReads, 0u);
+}
+
+TEST_F(BlurayStreamCacheTest, AFailedOpenIsRetriedByTheWorker)
+{
+  FakeFile* clip = AddFile("clip", 11, 8);
+  auto cache = CBlurayStreamCache::Claim(Config(), Factory());
+  ASSERT_NE(cache, nullptr);
+  auto view = cache->OpenFile("clip");
+
+  m_failOpens.store(2); // the worker's first two opens fail, its third works
+
+  std::vector<uint8_t> buffer(4096);
+  const int64_t n = view->Read(buffer.data(), buffer.size());
+  ASSERT_GT(n, 0);
+  EXPECT_TRUE(Matches(buffer, static_cast<size_t>(n), clip->id, 0));
+  EXPECT_EQ(cache->GetStats().failOpenReads, 0u)
+      << "a failed open must be retried by the worker, not read on the reader's thread";
 }
 
 TEST_F(BlurayStreamCacheTest, ReportsTheCoverAheadOfTheReadHead)
