@@ -100,6 +100,28 @@ DemuxPacket* CDemuxStreamSSIF::GetMVCPacket()
     DemuxPacket* mvcpkt = m_MVCqueue.front();
     double tsMVC = (mvcpkt->dts != DVD_NOPTS_VALUE ? mvcpkt->dts : mvcpkt->pts);
 
+    // A fragment with no timestamp at the front has lost the access unit it
+    // continued (a seek or flush cut it off). DVD_NOPTS_VALUE compares above
+    // every real timestamp, so left in place an untimed base-view fragment
+    // discarded every dependent-view packet behind it, forever: nothing was
+    // emitted and the base queue grew. Drop the orphan instead.
+    if (tsH264 == DVD_NOPTS_VALUE)
+    {
+      CLog::Log(LOGDEBUG, "CDemuxStreamSSIF - dropping an untimed base-view fragment ({} bytes)",
+                h264pkt->iSize);
+      CDVDDemuxUtils::FreeDemuxPacket(h264pkt);
+      m_H264queue.pop();
+      continue;
+    }
+    if (tsMVC == DVD_NOPTS_VALUE)
+    {
+      CLog::Log(LOGDEBUG, "CDemuxStreamSSIF - dropping an untimed dependent-view fragment ({} bytes)",
+                mvcpkt->iSize);
+      CDVDDemuxUtils::FreeDemuxPacket(mvcpkt);
+      m_MVCqueue.pop_front();
+      continue;
+    }
+
     if (tsH264 == tsMVC)
     {
       m_H264queue.pop();
