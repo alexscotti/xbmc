@@ -1114,7 +1114,13 @@ bool CBitstreamConverter::Convert(uint8_t* pData, int iSize)
           uint8_t* nal_start = pData;
           while (nal_start < end)
           {
+            // a size field or a NAL running past the packet ends it: the
+            // write would read past the demuxer's buffer
+            if (end - nal_start < 3)
+              break;
             nal_size = AV_RB24(nal_start);
+            if (nal_size > static_cast<uint32_t>(end - nal_start - 3))
+              break;
             avio_wb32(pb, nal_size);
             nal_start += 3;
             avio_write(pb, nal_start, nal_size);
@@ -1551,6 +1557,9 @@ bool CBitstreamConverter::BitstreamConvertInitHEVC(void* in_extradata, int in_ex
   uint32_t total_size = 0;
   uint8_t *out = NULL, array_nb, nal_type, sps_seen = 0, pps_seen = 0;
   const uint8_t* extradata = (uint8_t*)in_extradata + 21;
+  // every header read below is checked against this: a truncated or
+  // malformed hvcC read past the extradata
+  const uint8_t* const extradata_end = (uint8_t*)in_extradata + in_extrasize;
   static const uint8_t nalu_header[4] = {0, 0, 0, 1};
 
   // retrieve length coded size
@@ -1559,6 +1568,8 @@ bool CBitstreamConverter::BitstreamConvertInitHEVC(void* in_extradata, int in_ex
   array_nb = *extradata++;
   while (array_nb--)
   {
+    if (extradata_end - extradata < 3)
+      break;
     nal_type = *extradata++ & 0x3f;
     unit_nb = extradata[0] << 8 | extradata[1];
     extradata += 2;
@@ -1575,8 +1586,18 @@ bool CBitstreamConverter::BitstreamConvertInitHEVC(void* in_extradata, int in_ex
     {
       void* tmp;
 
+      if (extradata_end - extradata < 2)
+      {
+        array_nb = 0;
+        break;
+      }
       unit_size = extradata[0] << 8 | extradata[1];
       extradata += 2;
+      if (unit_size > extradata_end - extradata)
+      {
+        array_nb = 0;
+        break;
+      }
       if (nal_type != HEVC_NAL_SPS && nal_type != HEVC_NAL_PPS && nal_type != HEVC_NAL_VPS)
       {
         extradata += unit_size;
@@ -2058,11 +2079,14 @@ void CBitstreamConverter::BitstreamAllocAndCopy(uint8_t** poutbuf,
   if (nal_type == HEVC_NAL_UNSPEC62)
     nal_header_size = 4;
 
-  *poutbuf_size += sps_pps_size + in_size + nal_header_size;
-  tmp = av_realloc(*poutbuf, *poutbuf_size);
+  // the size grows only with the buffer: grown first, a failed realloc left
+  // the caller holding a size its buffer does not have
+  const int newSize = *poutbuf_size + sps_pps_size + in_size + nal_header_size;
+  tmp = av_realloc(*poutbuf, newSize);
   if (!tmp)
     return;
   *poutbuf = (uint8_t*)tmp;
+  *poutbuf_size = newSize;
   if (sps_pps)
     memcpy(*poutbuf + offset, sps_pps, sps_pps_size);
 
@@ -2101,11 +2125,13 @@ void CBitstreamConverter::BitstreamAllocAndCopy(uint8_t** poutbuf,
   else if (nal_type == HEVC_NAL_UNSPEC63)
     nal_header_size = 5;
 
-  *poutbuf_size += in_size + nal_header_size;
-  tmp = av_realloc(*poutbuf, *poutbuf_size);
+  // as above: the size grows only with the buffer
+  const uint32_t newSize = *poutbuf_size + in_size + nal_header_size;
+  tmp = av_realloc(*poutbuf, newSize);
   if (!tmp)
     return;
   *poutbuf = (uint8_t*)tmp;
+  *poutbuf_size = newSize;
 
   memcpy(*poutbuf + nal_header_size + offset, in, in_size);
 
