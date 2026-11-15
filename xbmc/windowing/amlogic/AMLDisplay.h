@@ -87,7 +87,12 @@ public:
   virtual ~CAMLDRMUtils();
 
   int aml_get_drmDevice_handle() const { return m_fd; }
-  uint32_t aml_get_drmDevice_crtc_id() const { return m_crtc ? m_crtc->crtc_id : 0; }
+  // under the lock: HotplugEvent frees and rebuilds m_crtc on the main thread
+  uint32_t aml_get_drmDevice_crtc_id()
+  {
+    std::unique_lock<CCriticalSection> lock(m_drmSection);
+    return CrtcIdForProperties();
+  }
   void aml_init_drmDevice();
   void aml_drmDevice_vsync();
   std::string aml_get_drmDevice_mode();
